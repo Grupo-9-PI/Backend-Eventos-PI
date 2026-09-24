@@ -17,10 +17,11 @@ from urllib.parse import urlparse
 import dj_database_url
 from dotenv import load_dotenv
 
-load_dotenv()
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(BASE_DIR / '.env')
+
 
 
 # Quick-start development settings - unsuitable for production
@@ -32,13 +33,25 @@ DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 env_hosts = [h.strip() for h in os.environ.get('ALLOWED_HOSTS', '').split(',') if h.strip()]
 env_origins = [o.strip() for o in os.environ.get('CSRF_TRUSTED_ORIGINS', '').split(',') if o.strip()]
+env_cors = [c.strip() for c in os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',') if c.strip()]
+if frontend_url := os.environ.get('FRONTEND_URL'):
+    env_cors.extend([u.strip() for u in frontend_url.split(',') if u.strip()])
+
+default_cors = [
+    "http://localhost:5173",  # Puerto por defecto de Vite (React)
+    "http://localhost:3000",  # Puerto alternativo (Create React App / Next)
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
 
 if render_url := os.environ.get('RENDER_EXTERNAL_URL'):
     ALLOWED_HOSTS = [*env_hosts, urlparse(render_url).hostname]
     CSRF_TRUSTED_ORIGINS = [*env_origins, render_url]
+    CORS_ALLOWED_ORIGINS = list(dict.fromkeys([*default_cors, *env_cors, render_url]))
 else:
     ALLOWED_HOSTS = env_hosts
     CSRF_TRUSTED_ORIGINS = env_origins
+    CORS_ALLOWED_ORIGINS = list(dict.fromkeys([*default_cors, *env_cors]))
 
 
 # Application definition
@@ -50,10 +63,14 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    #linea necesaria para api rest 
+    'corsheaders',
+    'rest_framework'
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -131,3 +148,4 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+
