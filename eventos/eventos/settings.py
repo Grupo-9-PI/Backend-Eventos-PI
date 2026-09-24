@@ -65,7 +65,9 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     #linea necesaria para api rest 
     'corsheaders',
-    'rest_framework'
+    'rest_framework',
+    #API
+    'api',
 ]
 
 MIDDLEWARE = [
@@ -148,4 +150,4 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-
+
