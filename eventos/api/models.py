@@ -6,6 +6,7 @@ from django.db import models
 
 class Evento(models.Model):
     nombre = models.CharField(max_length=255, verbose_name="Nombre del evento")
+    tipo = models.CharField(max_length=50, default="Lanzamiento", verbose_name="Tipo de evento")
     lugar = models.CharField(max_length=255, verbose_name="Lugar")
     fecha_inicio = models.DateField(verbose_name="Fecha de inicio")
     fecha_final = models.DateField(verbose_name="Fecha final")
@@ -13,11 +14,11 @@ class Evento(models.Model):
     duracion_horas = models.DecimalField(max_digits=6, decimal_places=2, verbose_name="Duración del evento (horas)")
     limite_diario_horas = models.DecimalField(max_digits=4, decimal_places=2, verbose_name="Límite diario de trabajo (horas)")
     notas_produccion = models.TextField(blank=True, null=True, verbose_name="Notas de producción")
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Creado en")
 
     def __str__(self):
         return self.nombre
 
-    
 
 class Subtarea(models.Model):
     # Esta es la pieza clave que conecta la tarea con un evento existente
@@ -35,9 +36,24 @@ class Subtarea(models.Model):
     ]
     categoria = models.CharField(max_length=50, choices=OPCIONES_CATEGORIA, verbose_name="Categoría")
     
+    OPCIONES_ESTADO = [
+        ('pendiente', 'Pendiente'),
+        ('en_progreso', 'En progreso'),
+        ('hecho', 'Hecho'),
+    ]
+    estado = models.CharField(max_length=20, choices=OPCIONES_ESTADO, default='pendiente', verbose_name="Estado")
+
+    OPCIONES_PRIORIDAD = [
+        ('alta', 'Alta'),
+        ('media', 'Media'),
+        ('baja', 'Baja'),
+    ]
+    prioridad = models.CharField(max_length=10, choices=OPCIONES_PRIORIDAD, default='media', verbose_name="Prioridad")
+
     estimacion_horas = models.DecimalField(max_digits=5, decimal_places=2, verbose_name="Estimación (horas)")
     plazo = models.DateField(verbose_name="Plazo (fecha)")
     hora_limite = models.TimeField(verbose_name="Hora límite")
+    hora_inicio = models.TimeField(null=True, blank=True, verbose_name="Hora inicio programado")
 
     def __str__(self):
         return f"{self.gestion} - {self.evento.nombre}"
