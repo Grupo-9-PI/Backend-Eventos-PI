@@ -12,7 +12,8 @@ urlpatterns = [
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     
     # La conexión a tus endpoints
-    path('api/', include('api.urls')),
+    path('api/',  include('api.urls')),
+    path('api/', include('health.urls')),
 ]
 
 
