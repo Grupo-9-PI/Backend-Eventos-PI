@@ -65,7 +65,10 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     #linea necesaria para api rest 
     'corsheaders',
-    'rest_framework'
+    'rest_framework',
+    #API
+    'api',
+    'drf_spectacular',
 ]
 
 MIDDLEWARE = [
@@ -148,4 +151,15 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-
+
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'API Gestión de Eventos',
+    'DESCRIPTION': 'Documentación interactiva para interactuar con eventos y subtareas',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
