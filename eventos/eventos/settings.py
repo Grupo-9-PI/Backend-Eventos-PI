@@ -171,13 +171,19 @@ REST_FRAMEWORK = {
 SPECTACULAR_SETTINGS = {
     'TITLE': 'API Gestión de Eventos',
     'DESCRIPTION': (
-        'Documentación interactiva para interactuar con eventos y gestiones. '
-        'Autentícate con el token que devuelve /api/auth/login/ usando el botón Authorize.'
+        'Documentación interactiva para interactuar con eventos y gestiones.\n\n'
+        '**Todas las rutas de eventos, subtareas y /api/hoy/ requieren token**: sin él la API '
+        'responde 401. Las únicas rutas públicas son /api/auth/login/ y /api/auth/registro/.\n\n'
+        'Para probar: ejecuta `POST /api/auth/login/`, copia el valor de `token` y pégalo en el '
+        'botón **Authorize** (como `Token <token>`). Los candados abiertos de los endpoints '
+        'protegidos pasan a cerrados al autorizar.'
     ),
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'TAGS': [
-        {'name': 'auth', 'description': 'Registro, login y sesión del organizador.'},
-        {'name': 'hoy', 'description': 'Gestiones agrupadas para la vista Hoy.'},
+        {'name': 'auth', 'description': 'Registro, login y sesión del organizador. Login y registro no requieren token.'},
+        {'name': 'hoy', 'description': 'Gestiones agrupadas para la vista Hoy. Requiere token.'},
+        {'name': 'eventos', 'description': 'CRUD de eventos y sus gestiones. Todas las rutas requieren token.'},
+        {'name': 'subtareas', 'description': 'CRUD de gestiones. Todas las rutas requieren token.'},
     ],
 }
