@@ -1,12 +1,17 @@
-from django.urls import path, include
+from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from .views import EventoViewSet, SubtareaViewSet
 
-# El DefaultRouter crea automáticamente todas las rutas (GET, POST, PUT, DELETE) para tu vista
+from . import views
+
 router = DefaultRouter()
-router.register(r'eventos', EventoViewSet)
-router.register(r'subtareas', SubtareaViewSet)
+router.register(r'eventos', views.EventoViewSet, basename='evento')
+router.register(r'subtareas', views.SubtareaViewSet, basename='subtarea')
 
 urlpatterns = [
+    path('auth/registro/', views.RegistroView.as_view(), name='registro'),
+    path('auth/login/', views.LoginView.as_view(), name='login'),
+    path('auth/logout/', views.LogoutView.as_view(), name='logout'),
+    path('auth/me/', views.MeView.as_view(), name='me'),
+    path('hoy/', views.HoyView.as_view(), name='hoy'),
     path('', include(router.urls)),
 ]

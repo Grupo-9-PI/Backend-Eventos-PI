@@ -1,10 +1,15 @@
+from django.conf import settings
 from django.db import models
 
-# Create your models here.
-
-from django.db import models
 
 class Evento(models.Model):
+    # Cada evento pertenece a un organizador: el login local aísla los datos entre cuentas.
+    propietario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='eventos',
+        verbose_name="Organizador",
+    )
     nombre = models.CharField(max_length=255, verbose_name="Nombre del evento")
     tipo = models.CharField(max_length=50, default="Lanzamiento", verbose_name="Tipo de evento")
     lugar = models.CharField(max_length=255, verbose_name="Lugar")
@@ -23,19 +28,19 @@ class Evento(models.Model):
 class Subtarea(models.Model):
     # Esta es la pieza clave que conecta la tarea con un evento existente
     evento = models.ForeignKey(Evento, on_delete=models.CASCADE, related_name='subtareas')
-    
+
     gestion = models.CharField(max_length=255, verbose_name="Nueva gestión")
-    
+
     # Opciones de categorías (puedes editar los nombres según las que ustedes tengan definidas)
     OPCIONES_CATEGORIA = [
         ('SALON', 'Salón'),
         ('INVITACIONES', 'Invitaciones'),
         ('CATERING', 'Catering'),
         ('PROVEEDORES', 'Proveedores'),
-        ('OTRO', 'Otro')
+        ('OTRO', 'Otro'),
     ]
     categoria = models.CharField(max_length=50, choices=OPCIONES_CATEGORIA, verbose_name="Categoría")
-    
+
     OPCIONES_ESTADO = [
         ('pendiente', 'Pendiente'),
         ('en_progreso', 'En progreso'),

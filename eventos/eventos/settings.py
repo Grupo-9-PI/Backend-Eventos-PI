@@ -66,6 +66,8 @@ INSTALLED_APPS = [
     #linea necesaria para api rest 
     'corsheaders',
     'rest_framework',
+    # Autenticación por token para el login local
+    'rest_framework.authtoken',
     #API
     'api',
     'drf_spectacular',
@@ -106,12 +108,13 @@ WSGI_APPLICATION = 'eventos.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-# Default to sqlite for local dev; on Render, DATABASE_URL points to Postgres.
+# Default to sqlite for local dev; on Render or Supabase, DATABASE_URL points to Postgres.
+DATABASE_URL = os.environ.get('DATABASE_URL', '')
 DATABASES = {
     'default': dj_database_url.config(
         default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
         conn_max_age=600,
-        ssl_require='DATABASE_URL' in os.environ,
+        ssl_require=DATABASE_URL.startswith(('postgres://', 'postgresql://')),
     )
 }
 
@@ -138,7 +141,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'es-co'
 
 TIME_ZONE = 'America/Bogota'
 
@@ -156,16 +159,25 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Toda la API exige token, excepto registro/login (AllowAny en cada vista).
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
 }
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'API Gestión de Eventos',
-    'DESCRIPTION': 'Documentación interactiva para interactuar con eventos y subtareas',
+    'DESCRIPTION': (
+        'Documentación interactiva para interactuar con eventos y gestiones. '
+        'Autentícate con el token que devuelve /api/auth/login/ usando el botón Authorize.'
+    ),
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    'TAGS': [
+        {'name': 'auth', 'description': 'Registro, login y sesión del organizador.'},
+        {'name': 'hoy', 'description': 'Gestiones agrupadas para la vista Hoy.'},
+    ],
 }
-
-
-
-STATIC_URL = 'static/'
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
