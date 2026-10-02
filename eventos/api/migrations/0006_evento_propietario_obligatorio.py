@@ -6,18 +6,15 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('api', '0003_actualizacion_modelos'),
+        ('api', '0005_limpiar_eventos_sin_propietario'),
     ]
 
     operations = [
-        # Se agrega permitiendo nulos para no romper bases con eventos previos al login.
-        # La limpieza y el paso a obligatorio viven en 0005 y 0006.
-        migrations.AddField(
+        # Ya sin eventos huérfanos, el organizador pasa a ser obligatorio.
+        migrations.AlterField(
             model_name='evento',
             name='propietario',
             field=models.ForeignKey(
-                null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name='eventos',
                 to=settings.AUTH_USER_MODEL,
