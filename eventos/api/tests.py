@@ -1,4 +1,5 @@
-from datetime import timedelta
+from datetime import date, datetime, timedelta
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -41,7 +42,7 @@ class BaseAPITest(APITestCase):
         datos.update(kwargs)
         return Evento.objects.create(**datos)
 
-    def crear_tarea(self, evento, plazo, estimacion='2.00', estado='pendiente', titulo='Gestión'):
+    def crear_tarea(self, evento, plazo, estimacion='2.00', estado='pendiente', titulo='Gestión', hora='12:00'):
         return Subtarea.objects.create(
             evento=evento,
             gestion=titulo,
@@ -50,7 +51,7 @@ class BaseAPITest(APITestCase):
             prioridad='media',
             estimacion_horas=estimacion,
             plazo=plazo,
-            hora_limite='12:00',
+            hora_limite=hora,
         )
 
 
@@ -201,29 +202,65 @@ class AislamientoTests(BaseAPITest):
         self.assertEqual(respuesta.data['propietario'], self.ana.id)
 
 
+FECHA_FIJA = date(2030, 1, 15)
+AHORA_FIJA = datetime(2030, 1, 15, 12, 0)
+
+
 class HoyTests(BaseAPITest):
     def setUp(self):
+        super().setUp()
+        # Reloj fijo para que la agrupación por fecha y hora sea determinista.
+        self.parche_fecha = mock.patch('api.views.timezone.localdate', return_value=FECHA_FIJA)
+        self.parche_hora = mock.patch(
+            'api.views.timezone.localtime',
+            return_value=timezone.make_aware(AHORA_FIJA),
+        )
+        self.parche_fecha.start()
+        self.parche_hora.start()
+        self.addCleanup(self.parche_fecha.stop)
+        self.addCleanup(self.parche_hora.stop)
+
         self.ana = self.crear_usuario('ana@ejemplo.com', 'Ana')
         self.beto = self.crear_usuario('beto@ejemplo.com', 'Beto')
-        self.evento = self.crear_evento(self.ana, 'Evento de Ana')
-        hoy = timezone.localdate()
-        self.vencida_grande = self.crear_tarea(self.evento, hoy - timedelta(days=2), '5.00', titulo='Vencida grande')
-        self.vencida_pequena = self.crear_tarea(self.evento, hoy - timedelta(days=2), '1.00', titulo='Vencida pequeña')
-        self.de_hoy = self.crear_tarea(self.evento, hoy, '2.00', titulo='Para hoy')
-        self.proxima = self.crear_tarea(self.evento, hoy + timedelta(days=3), '2.00', titulo='Próxima')
+        self.evento = self.crear_evento(
+            self.ana,
+            'Evento de Ana',
+            fecha_inicio=FECHA_FIJA + timedelta(days=30),
+            fecha_final=FECHA_FIJA + timedelta(days=30),
+        )
+        self.vencida_grande = self.crear_tarea(
+            self.evento, FECHA_FIJA - timedelta(days=2), '5.00',
+            titulo='Vencida grande', hora='11:00',
+        )
+        self.vencida_pequena = self.crear_tarea(
+            self.evento, FECHA_FIJA - timedelta(days=2), '1.00',
+            titulo='Vencida pequeña', hora='11:00',
+        )
+        self.vencida_de_hoy = self.crear_tarea(
+            self.evento, FECHA_FIJA, '2.00',
+            titulo='Ya pasó su hora', hora='10:00',
+        )
+        self.de_hoy = self.crear_tarea(
+            self.evento, FECHA_FIJA, '2.00',
+            titulo='Para hoy', hora='18:00',
+        )
+        self.proxima = self.crear_tarea(
+            self.evento, FECHA_FIJA + timedelta(days=3), '2.00',
+            titulo='Próxima', hora='12:00',
+        )
 
-    def test_agrupa_y_ordena_por_fecha_y_esfuerzo(self):
+    def test_agrupa_por_fecha_y_hora_y_ordena_por_esfuerzo(self):
         self.autenticar(self.ana)
         respuesta = self.client.get('/api/hoy/')
         self.assertEqual(respuesta.status_code, 200)
         grupos = respuesta.data['grupos']
         self.assertEqual(
             [t['titulo'] for t in grupos['vencidas']],
-            ['Vencida pequeña', 'Vencida grande'],
+            ['Vencida pequeña', 'Vencida grande', 'Ya pasó su hora'],
         )
         self.assertEqual([t['titulo'] for t in grupos['para_hoy']], ['Para hoy'])
         self.assertEqual([t['titulo'] for t in grupos['proximas']], ['Próxima'])
-        self.assertEqual(respuesta.data['total'], 4)
+        self.assertEqual(respuesta.data['total'], 5)
         self.assertEqual(respuesta.data['filtros'], {'evento': None, 'estado': 'abiertas'})
 
     def test_incluye_datos_del_evento_en_cada_tarea(self):
@@ -233,22 +270,27 @@ class HoyTests(BaseAPITest):
         self.assertEqual(tarea['evento'], {'id': self.evento.id, 'nombre': 'Evento de Ana'})
 
     def test_excluye_las_hechas_por_defecto(self):
-        self.crear_tarea(self.evento, timezone.localdate(), estado='hecho', titulo='Terminada')
+        self.crear_tarea(self.evento, FECHA_FIJA, estado='hecho', titulo='Terminada', hora='18:00')
         self.autenticar(self.ana)
         respuesta = self.client.get('/api/hoy/')
-        self.assertEqual(respuesta.data['total'], 4)
+        self.assertEqual(respuesta.data['total'], 5)
 
     def test_filtra_por_estado(self):
-        self.crear_tarea(self.evento, timezone.localdate(), estado='hecho', titulo='Terminada')
+        self.crear_tarea(self.evento, FECHA_FIJA, estado='hecho', titulo='Terminada', hora='18:00')
         self.autenticar(self.ana)
         respuesta = self.client.get('/api/hoy/', {'estado': 'hecho'})
         self.assertEqual([t['titulo'] for t in respuesta.data['grupos']['para_hoy']], ['Terminada'])
         respuesta = self.client.get('/api/hoy/', {'estado': 'todas'})
-        self.assertEqual(respuesta.data['total'], 5)
+        self.assertEqual(respuesta.data['total'], 6)
 
     def test_filtra_por_evento(self):
-        otro_evento = self.crear_evento(self.ana, 'Otro evento')
-        self.crear_tarea(otro_evento, timezone.localdate(), titulo='De otro evento')
+        otro_evento = self.crear_evento(
+            self.ana,
+            'Otro evento',
+            fecha_inicio=FECHA_FIJA + timedelta(days=30),
+            fecha_final=FECHA_FIJA + timedelta(days=30),
+        )
+        self.crear_tarea(otro_evento, FECHA_FIJA, titulo='De otro evento', hora='18:00')
         self.autenticar(self.ana)
         respuesta = self.client.get('/api/hoy/', {'evento': otro_evento.id})
         self.assertEqual(respuesta.data['total'], 1)
@@ -263,9 +305,19 @@ class HoyTests(BaseAPITest):
         self.assertEqual(self.client.get('/api/hoy/', {'evento': 'abc'}).status_code, 400)
 
     def test_no_muestra_gestiones_de_otros_organizadores(self):
-        evento_beto = self.crear_evento(self.beto, 'Evento de Beto')
-        self.crear_tarea(evento_beto, timezone.localdate(), titulo='De Beto')
+        evento_beto = self.crear_evento(
+            self.beto,
+            'Evento de Beto',
+            fecha_inicio=FECHA_FIJA + timedelta(days=30),
+            fecha_final=FECHA_FIJA + timedelta(days=30),
+        )
+        self.crear_tarea(evento_beto, FECHA_FIJA, titulo='De Beto', hora='18:00')
         self.autenticar(self.ana)
         respuesta = self.client.get('/api/hoy/', {'estado': 'todas'})
-        titulos = [t['titulo'] for t in respuesta.data['grupos']['para_hoy']]
+        self.assertEqual(respuesta.data['total'], 5)
+        titulos = [
+            t['titulo']
+            for grupo in respuesta.data['grupos'].values()
+            for t in grupo
+        ]
         self.assertNotIn('De Beto', titulos)

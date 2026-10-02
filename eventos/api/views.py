@@ -173,8 +173,9 @@ class HoyView(APIView):
         tags=['hoy'],
         summary='Gestiones agrupadas para la vista Hoy',
         description=(
-            'Devuelve las gestiones del organizador autenticado agrupadas en **vencidas**, '
-            '**para_hoy** y **proximas**, ya ordenadas para mostrar en la vista Hoy.\n\n'
+            'Devuelve las gestiones del organizador autenticado agrupadas en **vencidas** '
+            '(fecha y hora límite ya pasadas), **para_hoy** (vence hoy y su hora aún no pasa) '
+            'y **proximas**, ya ordenadas para mostrar en la vista Hoy.\n\n'
             '**Orden dentro de cada grupo:** primero la fecha límite más cercana; si dos gestiones '
             'comparten fecha, va primero la de menor esfuerzo estimado; ante un empate total se usa '
             'la hora límite.\n\n'
@@ -215,6 +216,7 @@ class HoyView(APIView):
     )
     def get(self, request):
         hoy = timezone.localdate()
+        ahora = timezone.localtime().time().replace(tzinfo=None)
         tareas = Subtarea.objects.filter(evento__propietario=request.user).select_related('evento')
 
         evento_id = request.query_params.get('evento')
@@ -243,10 +245,18 @@ class HoyView(APIView):
 
         # Orden pedido por la regla de priorización: fecha, menor esfuerzo y hora límite.
         tareas = list(tareas.order_by('plazo', 'estimacion_horas', 'hora_limite'))
+        vencidas, para_hoy, proximas = [], [], []
+        for tarea in tareas:
+            if tarea.plazo < hoy or (tarea.plazo == hoy and tarea.hora_limite < ahora):
+                vencidas.append(tarea)
+            elif tarea.plazo == hoy:
+                para_hoy.append(tarea)
+            else:
+                proximas.append(tarea)
         grupos = {
-            'vencidas': [t for t in tareas if t.plazo < hoy],
-            'para_hoy': [t for t in tareas if t.plazo == hoy],
-            'proximas': [t for t in tareas if t.plazo > hoy],
+            'vencidas': vencidas,
+            'para_hoy': para_hoy,
+            'proximas': proximas,
         }
         datos = {
             'generado_en': hoy,
