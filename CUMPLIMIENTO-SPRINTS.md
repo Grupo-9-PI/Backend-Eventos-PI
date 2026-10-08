@@ -151,18 +151,88 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
 
 ---
 
+## Sprint 3 — Reprogramación, sobrecarga y resolución de conflictos
+
+### Análisis de requerimientos: backend vs. frontend
+
+| # | Requerimiento | Responsable |
+| --- | --- | --- |
+| 1 | Reprogramar gestión (cambio de plazo/fecha persiste y se refleja en `/hoy`) | **Backend** — PATCH + lógica de sobrecarga |
+| 2 | Límite diario configurable de horas por organizador (set/get, default 6h) | **Backend** — modelo + endpoints |
+| 3 | Conflicto estándar: detección de sobrecarga con cifras exactas | **Backend** — validación atómica → 409 JSON |
+| 4 | Resolución: ≥1 estrategia funcional (mover día / reducir horas) | **Backend** — endpoint `resolver-conflicto` |
+| 5 | Calidad IxD: diálogo de conflicto sin jerga técnica | **Frontend** — consume el JSON del 409 |
+| 6 | Evidencia UX/HCI + endpoints documentados + bitácora | **Backend** (docs) + **Frontend** (UX) |
+
+### C1 — Límite diario configurable
+
+- Nuevo modelo `ConfiguracionOrganizador` (OneToOne a `auth.User`, `default=6.00`), migración
+  `0007_configuracion_organizador`.
+- Se crea automáticamente (señal `post_save`) al registrar un organizador.
+- Endpoints:
+  - `GET /api/config/` — devuelve `{ "limite_diario_horas": "6.00" }`.
+  - `PUT /api/config/` — actualiza el límite (validación: > 0 y ≤ 24).
+  - `PATCH /api/config/` — actualización parcial.
+- `GET /api/auth/me/` ahora incluye `limite_diario_horas` del organizador autenticado.
+
+### C2 — Reprogramar con detección de sobrecarga (409 Conflict)
+
+- `PATCH /api/subtareas/{id}/reprogramar/` acepta `plazo`, `hora_limite` (opcional) y
+  `estimacion_horas` (opcional).
+- **Algoritmo:** suma `estimacion_horas` de todas las subtareas del organizador cuyo `plazo` sea la
+  nueva fecha (excluyendo la propia), compara con el límite. Si el exceso > 0 → **aborta** (sin
+  escribir en BD) y devuelve `409` con:
+  ```json
+  {
+    "conflicto": true,
+    "codigo": "SOBRECARGA_DIARIA",
+    "mensaje": "Sobrecarga detectada para el 20/10/2026. Tu límite diario es de 6.00h…",
+    "fecha": "2026-10-20",
+    "limite_horas": "6.00",
+    "horas_actuales": "5.00",
+    "horas_nueva_gestion": "2.50",
+    "horas_totales_proyectadas": "7.50",
+    "horas_exceso": "1.50",
+    "estrategias_disponibles": ["mover_otro_dia", "reducir_horas"]
+  }
+  ```
+- Sin conflicto → persiste atómicamente y devuelve `200` con la gestión actualizada.
+- El cambio persiste en `/api/hoy/` inmediatamente (agrupa por `plazo`).
+
+### C3 — Resolución de conflicto
+
+- `POST /api/subtareas/{id}/resolver-conflicto/` con campo `estrategia`:
+  - `mover_otro_dia` + `plazo` (requerido) → mueve sin re-validar.
+  - `reducir_horas` + `estimacion_horas` (requerido) → ajusta la estimación; mantiene el plazo.
+- Ambas estrategias persisten atómicamente y devuelven la gestión actualizada.
+
+### Nuevas rutas (tabla actualizada)
+
+| Método | Ruta | Auth | Descripción |
+| --- | --- | --- | --- |
+| GET/PUT/PATCH | `/api/config/` | Token | Límite diario de horas del organizador. |
+| PATCH | `/api/subtareas/{id}/reprogramar/` | Token | Reprogramar con detección de sobrecarga (409). |
+| POST | `/api/subtareas/{id}/resolver-conflicto/` | Token | Aplicar estrategia de resolución. |
+
+---
+
 ## Evidencia técnica consolidada
 
-- **23 tests** en `eventos/api/tests.py`:
+- **48 tests** en `eventos/api/tests.py`:
   - `AutenticacionTests` (7): 401 sin token, registro, correo duplicado, contraseña débil,
-    login válido/ inválido, `me` y `logout`.
+    login válido/inválido, `me` y `logout`.
   - `AislamientoTests` (7): listados, detalle, edición, eliminación y gestiones entre cuentas;
     el dueño se asigna desde la sesión.
   - `HoyTests` (9): agrupación por fecha y hora, orden por esfuerzo, filtros, códigos de error y
     aislamiento; con reloj fijo para resultados deterministas.
-- Esquema OpenAPI validado con `manage.py spectacular --validate` (0 errores, 0 advertencias).
-- Prueba de humo contra Postgres real: registro 201 → evento 201 → gestión 201 → `/api/hoy/`
-  agrupado → 401 sin token → el organizador B no ve datos del A.
+  - `ConfiguracionTests` (8): GET/PUT/PATCH del límite, validaciones (0, negativo, > 24h),
+    token requerido, `me` expone el límite.
+  - `ReprogramarTests` (6): sin conflicto → 200, con sobrecarga → 409 con cifras, no modifica BD
+    en conflicto, reducción evita sobrecarga, token requerido, aislamiento entre organizadores.
+  - `ResolverConflictoTests` (6): estrategia mover día, reducir horas, 400 sin campos requeridos,
+    404 en gestión ajena, token requerido.
+- Esquema OpenAPI validado con `manage.py spectacular --validate` (**0 errores, 0 advertencias**).
+- Migración `0007_configuracion_organizador` incluida.
 
 ## Pendientes y evidencia externa
 
@@ -172,3 +242,4 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
   la UI avisa que lo gestione el administrador.
 - Variables de entorno de producción en Render: `DATABASE_URL`, `SECRET_KEY`, `DEBUG=False`,
   `FRONTEND_URL`/`CORS_ALLOWED_ORIGINS`.
+

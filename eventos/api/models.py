@@ -62,3 +62,39 @@ class Subtarea(models.Model):
 
     def __str__(self):
         return f"{self.gestion} - {self.evento.nombre}"
+
+
+class ConfiguracionOrganizador(models.Model):
+    # Límite diario configurable de horas de gestión por organizador (default 6h).
+    usuario = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='configuracion',
+        verbose_name="Organizador",
+    )
+    limite_diario_horas = models.DecimalField(
+        max_digits=4,
+        decimal_places=2,
+        default=6.00,
+        verbose_name="Límite diario de gestión (horas)",
+    )
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Creado en")
+    actualizado_en = models.DateTimeField(auto_now=True, verbose_name="Actualizado en")
+
+    class Meta:
+        verbose_name = "Configuración del organizador"
+        verbose_name_plural = "Configuraciones de organizadores"
+
+    def __str__(self):
+        return f"Configuración de {self.usuario.username} ({self.limite_diario_horas}h)"
+
+
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def asegurar_configuracion_organizador(sender, instance, created, **kwargs):
+    if created:
+        ConfiguracionOrganizador.objects.get_or_create(usuario=instance)
+

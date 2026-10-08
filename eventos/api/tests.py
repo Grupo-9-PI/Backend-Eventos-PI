@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APITestCase
 
-from .models import Evento, Subtarea
+from .models import ConfiguracionOrganizador, Evento, Subtarea
 
 Usuario = get_user_model()
 
@@ -321,3 +321,231 @@ class HoyTests(BaseAPITest):
             for t in grupo
         ]
         self.assertNotIn('De Beto', titulos)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Configuración del organizador (límite diario)
+# ---------------------------------------------------------------------------
+
+class ConfiguracionTests(BaseAPITest):
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+
+    def test_get_config_devuelve_limite_default_6h(self):
+        respuesta = self.client.get('/api/config/')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.data['limite_diario_horas'], '6.00')
+
+    def test_put_config_actualiza_limite(self):
+        respuesta = self.client.put('/api/config/', {'limite_diario_horas': '8.00'}, format='json')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.data['limite_diario_horas'], '8.00')
+        config = ConfiguracionOrganizador.objects.get(usuario=self.ana)
+        self.assertEqual(str(config.limite_diario_horas), '8.00')
+
+    def test_patch_config_actualiza_limite(self):
+        respuesta = self.client.patch('/api/config/', {'limite_diario_horas': '4.50'}, format='json')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.data['limite_diario_horas'], '4.50')
+
+    def test_config_rechaza_limite_cero(self):
+        respuesta = self.client.put('/api/config/', {'limite_diario_horas': '0'}, format='json')
+        self.assertEqual(respuesta.status_code, 400)
+
+    def test_config_rechaza_limite_negativo(self):
+        respuesta = self.client.put('/api/config/', {'limite_diario_horas': '-1'}, format='json')
+        self.assertEqual(respuesta.status_code, 400)
+
+    def test_config_rechaza_limite_mayor_a_24h(self):
+        respuesta = self.client.put('/api/config/', {'limite_diario_horas': '25'}, format='json')
+        self.assertEqual(respuesta.status_code, 400)
+
+    def test_config_requiere_token(self):
+        self.client.credentials()
+        respuesta = self.client.get('/api/config/')
+        self.assertEqual(respuesta.status_code, 401)
+
+    def test_me_incluye_limite_diario_horas(self):
+        """El endpoint /api/auth/me/ ahora expone el límite del organizador."""
+        respuesta = self.client.get('/api/auth/me/')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn('limite_diario_horas', respuesta.data)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Reprogramar una gestión con detección de sobrecarga (409)
+# ---------------------------------------------------------------------------
+
+DIA_REPROGRAM = date(2030, 3, 10)
+
+
+class ReprogramarTests(BaseAPITest):
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        # Establecer límite diario a 6h
+        ConfiguracionOrganizador.objects.update_or_create(
+            usuario=self.ana, defaults={'limite_diario_horas': '6.00'}
+        )
+        self.evento = self.crear_evento(
+            self.ana,
+            fecha_inicio=DIA_REPROGRAM + timedelta(days=30),
+            fecha_final=DIA_REPROGRAM + timedelta(days=30),
+        )
+        # Gestión existente en el día objetivo: 5h
+        self.otra = self.crear_tarea(self.evento, DIA_REPROGRAM, estimacion='5.00', titulo='Existente')
+        # Gestión a reprogramar (en otro día): 2h
+        self.gestion = self.crear_tarea(
+            self.evento,
+            DIA_REPROGRAM + timedelta(days=5),
+            estimacion='2.00',
+            titulo='A reprogramar',
+        )
+
+    def test_reprogramar_sin_conflicto_persiste_y_devuelve_200(self):
+        """Mover a un día vacío: OK."""
+        dia_libre = DIA_REPROGRAM + timedelta(days=10)
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(dia_libre), 'hora_limite': '10:00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.plazo, dia_libre)
+
+    def test_reprogramar_con_sobrecarga_devuelve_409_con_cifras(self):
+        """Mover al día que ya tiene 5h (límite 6h) + 2h propias = 7h → 409."""
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(DIA_REPROGRAM), 'hora_limite': '10:00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 409)
+        self.assertTrue(respuesta.data['conflicto'])
+        self.assertEqual(respuesta.data['codigo'], 'SOBRECARGA_DIARIA')
+        # Las cifras exactas deben estar en la respuesta
+        self.assertIn('horas_actuales', respuesta.data)
+        self.assertIn('horas_exceso', respuesta.data)
+        self.assertIn('horas_totales_proyectadas', respuesta.data)
+        self.assertIn('estrategias_disponibles', respuesta.data)
+        self.assertIn('mover_otro_dia', respuesta.data['estrategias_disponibles'])
+        self.assertIn('reducir_horas', respuesta.data['estrategias_disponibles'])
+
+    def test_reprogramar_409_no_modifica_la_gestion(self):
+        """Tras un 409 la gestión debe quedar sin cambios en BD."""
+        plazo_original = self.gestion.plazo
+        self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(DIA_REPROGRAM)},
+            format='json',
+        )
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.plazo, plazo_original)
+
+    def test_reprogramar_con_reduccion_evita_conflicto(self):
+        """Mover al día cargado pero reduciendo a 0.5h (total 5.5h < 6h) → 200."""
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(DIA_REPROGRAM), 'estimacion_horas': '0.50'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+
+    def test_reprogramar_requiere_token(self):
+        self.client.credentials()
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(DIA_REPROGRAM)},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 401)
+
+    def test_reprogramar_no_aplica_a_gestion_ajena(self):
+        beto = self.crear_usuario('beto@test.com', 'Beto')
+        self.autenticar(beto)
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(DIA_REPROGRAM + timedelta(days=10))},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 404)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Resolución de conflicto de sobrecarga
+# ---------------------------------------------------------------------------
+
+class ResolverConflictoTests(BaseAPITest):
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        ConfiguracionOrganizador.objects.update_or_create(
+            usuario=self.ana, defaults={'limite_diario_horas': '6.00'}
+        )
+        self.evento = self.crear_evento(
+            self.ana,
+            fecha_inicio=DIA_REPROGRAM + timedelta(days=30),
+            fecha_final=DIA_REPROGRAM + timedelta(days=30),
+        )
+        self.gestion = self.crear_tarea(
+            self.evento, DIA_REPROGRAM, estimacion='3.00', titulo='A resolver'
+        )
+
+    def test_estrategia_mover_otro_dia_persiste_nueva_fecha(self):
+        nuevo_dia = DIA_REPROGRAM + timedelta(days=2)
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'mover_otro_dia', 'plazo': str(nuevo_dia), 'hora_limite': '09:00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.plazo, nuevo_dia)
+
+    def test_estrategia_reducir_horas_persiste_nueva_estimacion(self):
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'reducir_horas', 'estimacion_horas': '1.00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.gestion.refresh_from_db()
+        self.assertEqual(str(self.gestion.estimacion_horas), '1.00')
+
+    def test_mover_otro_dia_sin_plazo_devuelve_400(self):
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'mover_otro_dia'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+
+    def test_reducir_horas_sin_estimacion_devuelve_400(self):
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'reducir_horas'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+
+    def test_resolver_conflicto_de_gestion_ajena_devuelve_404(self):
+        beto = self.crear_usuario('beto@test.com', 'Beto')
+        self.autenticar(beto)
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'reducir_horas', 'estimacion_horas': '1.00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 404)
+
+    def test_resolver_conflicto_requiere_token(self):
+        self.client.credentials()
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'reducir_horas', 'estimacion_horas': '1.00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 401)
+
