@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import Sum
@@ -21,6 +22,7 @@ from .serializers import (
     LoginSerializer,
     RegistroSerializer,
     ReprogramarTareaSerializer,
+    ResolverConflictoRespuestaSerializer,
     ResolverConflictoSerializer,
     RespuestaAuthSerializer,
     RespuestaHoySerializer,
@@ -42,6 +44,11 @@ EJEMPLO_RESPUESTA_CONFLICTO = {
     "horas_totales_proyectadas": "7.50",
     "horas_exceso": "1.50",
     "estrategias_disponibles": ["mover_otro_dia", "reducir_horas"],
+    "fechas_sugeridas": [
+        {"fecha": "2026-10-16", "horas_totales_proyectadas": "2.50"},
+        {"fecha": "2026-10-17", "horas_totales_proyectadas": "2.50"},
+        {"fecha": "2026-10-18", "horas_totales_proyectadas": "0.50"},
+    ],
     "detalles": {
         "fecha": "2026-10-15",
         "limite_horas": "6.00",
@@ -50,6 +57,29 @@ EJEMPLO_RESPUESTA_CONFLICTO = {
         "horas_totales_proyectadas": "7.50",
         "horas_exceso": "1.50",
     },
+}
+
+EJEMPLO_RESPUESTA_RESOLUCION = {
+    "resuelto": True,
+    "mensaje": (
+        "Conflicto resuelto. El 2026-10-16 queda con 2.50h planificadas de las 6.00h de límite diario."
+    ),
+    "subtarea": {
+        "id": 7,
+        "evento": 3,
+        "gestion": "Confirmar menú con el catering",
+        "categoria": "CATERING",
+        "estado": "pendiente",
+        "prioridad": "alta",
+        "estimacion_horas": "2.50",
+        "plazo": "2026-10-16",
+        "hora_limite": "15:00:00",
+        "hora_inicio": None,
+    },
+    "limite_horas": "6.00",
+    "horas_totales_proyectadas": "2.50",
+    "horas_exceso": "0.00",
+    "fechas_sugeridas": [],
 }
 
 EJEMPLO_TAREA_VENCIDA = {
@@ -396,18 +426,18 @@ def _obtener_limite_organizador(usuario):
     return config.limite_diario_horas
 
 
-def _calcular_sobrecarga(usuario, fecha_nueva, estimacion_nueva, excluir_subtarea_id=None):
+def _cifras_dia(usuario, fecha, estimacion_nueva, excluir_subtarea_id=None):
     """
-    Calcula si al asignar `estimacion_nueva` horas al día `fecha_nueva` se supera
-    el límite diario del organizador.
+    Calcula las cifras de carga de un día para el organizador.
 
-    Devuelve un dict con cifras si hay sobrecarga, o None si no la hay.
+    Solo cuentan las gestiones abiertas (se excluyen las hechas) y opcionalmente
+    se ignora una gestión (la que se está reprogramando) para no contarla dos veces.
     """
     limite = _obtener_limite_organizador(usuario)
     qs = Subtarea.objects.filter(
         evento__propietario=usuario,
-        plazo=fecha_nueva,
-    )
+        plazo=fecha,
+    ).exclude(estado='hecho')
     if excluir_subtarea_id is not None:
         qs = qs.exclude(pk=excluir_subtarea_id)
 
@@ -416,16 +446,45 @@ def _calcular_sobrecarga(usuario, fecha_nueva, estimacion_nueva, excluir_subtare
     horas_proyectadas = horas_actuales + estimacion_nueva
     exceso = horas_proyectadas - limite
 
-    if exceso > 0:
-        return {
-            'fecha': fecha_nueva,
-            'limite_horas': limite,
-            'horas_actuales': horas_actuales,
-            'horas_nueva_gestion': estimacion_nueva,
-            'horas_totales_proyectadas': horas_proyectadas,
-            'horas_exceso': exceso,
-        }
-    return None
+    return {
+        'fecha': fecha,
+        'limite_horas': limite,
+        'horas_actuales': horas_actuales,
+        'horas_nueva_gestion': estimacion_nueva,
+        'horas_totales_proyectadas': horas_proyectadas,
+        'horas_exceso': max(exceso, Decimal('0')),
+    }
+
+
+def _calcular_sobrecarga(usuario, fecha_nueva, estimacion_nueva, excluir_subtarea_id=None):
+    """
+    Devuelve las cifras del día si al asignar `estimacion_nueva` horas se supera
+    el límite diario del organizador, o None si no hay sobrecarga.
+    """
+    cifras = _cifras_dia(usuario, fecha_nueva, estimacion_nueva, excluir_subtarea_id)
+    return cifras if cifras['horas_exceso'] > 0 else None
+
+
+def _sugerir_fechas(usuario, fecha_base, estimacion_nueva, excluir_subtarea_id=None,
+                    horizonte_dias=90, maximo=3):
+    """
+    Sugiere días próximos en los que la gestión cabe sin superar el límite diario.
+
+    Recorre desde el día siguiente a `fecha_base` hasta `horizonte_dias` y devuelve
+    hasta `maximo` fechas con su carga total proyectada.
+    """
+    sugeridas = []
+    for dias in range(1, horizonte_dias + 1):
+        fecha = fecha_base + timedelta(days=dias)
+        cifras = _cifras_dia(usuario, fecha, estimacion_nueva, excluir_subtarea_id)
+        if cifras['horas_exceso'] <= 0:
+            sugeridas.append({
+                'fecha': fecha,
+                'horas_totales_proyectadas': cifras['horas_totales_proyectadas'],
+            })
+            if len(sugeridas) >= maximo:
+                break
+    return sugeridas
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +554,8 @@ class SubtareaViewSet(viewsets.ModelViewSet):
             'diario del organizador (configurable en `/api/config/`), el servidor **aborta la '
             'transacción** y devuelve `409 Conflict` con las cifras exactas del exceso para que '
             'el frontend pueda mostrar un diálogo de conflicto comprensible al usuario.\n\n'
+            'El cálculo solo cuenta gestiones abiertas (excluye las hechas) y responde también '
+            '**`fechas_sugeridas`**: días próximos en los que la gestión cabe sin superar el límite.\n\n'
             'Si no hay sobrecarga, persiste el cambio y devuelve la gestión actualizada.'
         ),
         request=ReprogramarTareaSerializer,
@@ -571,6 +632,12 @@ class SubtareaViewSet(viewsets.ModelViewSet):
                 ),
                 **conflicto,
                 'estrategias_disponibles': ['mover_otro_dia', 'reducir_horas'],
+                'fechas_sugeridas': _sugerir_fechas(
+                    usuario=request.user,
+                    fecha_base=fecha_nueva,
+                    estimacion_nueva=estimacion_nueva,
+                    excluir_subtarea_id=subtarea.pk,
+                ),
             }
             return Response(cuerpo, status=status.HTTP_409_CONFLICT)
 
@@ -597,16 +664,17 @@ class ResolverConflictoView(APIView):
         summary='Resolver conflicto de sobrecarga con una estrategia',
         description=(
             'Aplica la estrategia elegida por el organizador para resolver el conflicto de '
-            'sobrecarga detectado al reprogramar.\n\n'
+            'sobrecarga detectado al reprogramar, y **recalcula** el día para confirmar el resultado.\n\n'
             '**Estrategias disponibles:**\n'
-            '- `mover_otro_dia`: mueve la gestión al `plazo` indicado (sin verificar de nuevo).\n'
+            '- `mover_otro_dia`: mueve la gestión al `plazo` indicado.\n'
             '- `reducir_horas`: cambia la `estimacion_horas` de la gestión al valor indicado; '
             'mantiene el plazo original.\n\n'
-            'Ambas estrategias persisten el cambio y devuelven la gestión actualizada.'
+            'Si el conflicto persiste tras aplicar el cambio, la respuesta lo indica con '
+            '`resuelto: false`, las nuevas cifras y `fechas_sugeridas` para seguir resolviendo.'
         ),
         request=ResolverConflictoSerializer,
         responses={
-            200: SubtareaSerializer,
+            200: ResolverConflictoRespuestaSerializer,
             400: OpenApiTypes.OBJECT,
             404: OpenApiTypes.OBJECT,
         },
@@ -620,6 +688,11 @@ class ResolverConflictoView(APIView):
                 'Estrategia: reducir horas',
                 value={"estrategia": "reducir_horas", "estimacion_horas": "1.00"},
                 request_only=True,
+            ),
+            OpenApiExample(
+                'Respuesta con conflicto resuelto',
+                value=EJEMPLO_RESPUESTA_RESOLUCION,
+                response_only=True,
             ),
         ],
     )
@@ -661,4 +734,41 @@ class ResolverConflictoView(APIView):
 
             subtarea.save()
 
-        return Response(SubtareaSerializer(subtarea, context={'request': request}).data)
+        # Recalcular el día para confirmar si el conflicto quedó resuelto o persiste.
+        cifras = _cifras_dia(
+            usuario=request.user,
+            fecha=subtarea.plazo,
+            estimacion_nueva=subtarea.estimacion_horas,
+            excluir_subtarea_id=subtarea.pk,
+        )
+        resuelto = cifras['horas_exceso'] <= 0
+        if resuelto:
+            mensaje = (
+                f"Conflicto resuelto. El {subtarea.plazo.strftime('%d/%m/%Y')} queda con "
+                f"{cifras['horas_totales_proyectadas']}h planificadas de las "
+                f"{cifras['limite_horas']}h de límite diario."
+            )
+        else:
+            mensaje = (
+                f"El conflicto persiste: el {subtarea.plazo.strftime('%d/%m/%Y')} quedaría con "
+                f"{cifras['horas_totales_proyectadas']}h planificadas, superando el límite de "
+                f"{cifras['limite_horas']}h por {cifras['horas_exceso']}h."
+            )
+
+        cuerpo = {
+            'resuelto': resuelto,
+            'mensaje': mensaje,
+            'subtarea': SubtareaSerializer(subtarea, context={'request': request}).data,
+            'limite_horas': cifras['limite_horas'],
+            'horas_totales_proyectadas': cifras['horas_totales_proyectadas'],
+            'horas_exceso': cifras['horas_exceso'],
+            'fechas_sugeridas': [],
+        }
+        if not resuelto:
+            cuerpo['fechas_sugeridas'] = _sugerir_fechas(
+                usuario=request.user,
+                fecha_base=subtarea.plazo,
+                estimacion_nueva=subtarea.estimacion_horas,
+                excluir_subtarea_id=subtarea.pk,
+            )
+        return Response(cuerpo)
