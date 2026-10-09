@@ -262,6 +262,8 @@ Detalle de cada uno de los archivos modificados en el repositorio:
      `ResolverConflictoSerializer`, `FechaSugeridaSerializer`, `DetalleConflictoSerializer`,
      `ErrorConflictoSerializer` y `ResolverConflictoRespuestaSerializer`.
    - Validación de rango del límite diario entre 1 y 16 horas.
+   - `EventoSerializer` expone **`horas_planificadas`** (`SerializerMethodField`): la suma de las
+     estimaciones de sus gestiones, calculada por el servidor y usada para las sobrecargas.
    - Modificación de `UsuarioSerializer` para exponer `limite_diario_horas` con anotación
      `@extend_schema_field(serializers.CharField())` para OpenAPI.
 5. **`eventos/api/views.py`**:
@@ -301,11 +303,13 @@ Detalle de cada uno de los archivos modificados en el repositorio:
 
 ## Evidencia técnica consolidada
 
-- **50 tests** en `eventos/api/tests.py` (todos ejecutándose con éxito en SQLite local):
+- **52 tests** en `eventos/api/tests.py` (todos ejecutándose con éxito en SQLite local):
   - `AutenticacionTests` (8): 401 sin token, registro, correo duplicado, contraseña débil,
     login válido/inválido, `me` y `logout`.
   - `AislamientoTests` (7): listados, detalle, edición, eliminación y gestiones entre cuentas;
     el dueño se asigna desde la sesión.
+  - `EventoHorasTests` (2): `horas_planificadas` refleja la suma de las gestiones (incluidas las
+    hechas) y vale 0 sin gestiones.
   - `HoyTests` (8): agrupación por fecha y hora, orden por esfuerzo, filtros, códigos de error y
     aislamiento; con reloj fijo para resultados deterministas.
   - `ConfiguracionTests` (11): GET del límite por defecto (6h), PUT/PATCH de actualización,

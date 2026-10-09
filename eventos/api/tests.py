@@ -203,6 +203,29 @@ class AislamientoTests(BaseAPITest):
         self.assertEqual(respuesta.data['propietario'], self.ana.id)
 
 
+class EventoHorasTests(BaseAPITest):
+    """El evento expone las horas de trabajo calculadas a partir de sus gestiones."""
+
+    def test_evento_expone_horas_planificadas(self):
+        ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(ana)
+        evento = self.crear_evento(ana)
+        self.crear_tarea(evento, timezone.localdate(), estimacion='2.00', titulo='Abierta')
+        self.crear_tarea(evento, timezone.localdate(), estimacion='1.50', estado='hecho', titulo='Hecha')
+
+        respuesta = self.client.get(f'/api/eventos/{evento.id}/')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.data['horas_planificadas'], '3.50')
+
+    def test_evento_sin_gestiones_expone_cero_horas(self):
+        ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(ana)
+        evento = self.crear_evento(ana)
+
+        respuesta = self.client.get(f'/api/eventos/{evento.id}/')
+        self.assertEqual(respuesta.data['horas_planificadas'], '0')
+
+
 FECHA_FIJA = date(2030, 1, 15)
 AHORA_FIJA = datetime(2030, 1, 15, 12, 0)
 
