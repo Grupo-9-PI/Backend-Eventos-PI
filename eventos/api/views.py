@@ -255,6 +255,18 @@ class ConfiguracionOrganizadorView(APIView):
             200: ConfiguracionOrganizadorSerializer,
             400: OpenApiTypes.OBJECT,
         },
+        examples=[
+            OpenApiExample(
+                'Actualización parcial a 7.5h',
+                value={"limite_diario_horas": "7.50"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Respuesta de actualización parcial',
+                value={"limite_diario_horas": "7.50"},
+                response_only=True,
+            ),
+        ],
     )
     def patch(self, request):
         return self._guardar(request, partial=True)

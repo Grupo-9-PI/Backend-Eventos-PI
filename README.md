@@ -54,11 +54,14 @@ cd eventos
 | POST | `/api/auth/login/` | Pública | Devuelve el token del organizador. |
 | POST | `/api/auth/logout/` | Token | Invalida el token actual. |
 | GET | `/api/auth/me/` | Token | Datos del organizador autenticado. |
+| GET/PUT/PATCH | `/api/config/` | Token | Límite diario configurable de horas de gestión por organizador (default 6.00h). |
 | GET/POST | `/api/eventos/` | Token | Lista (solo propios) o crea eventos. |
 | GET/PUT/PATCH/DELETE | `/api/eventos/{id}/` | Token | Detalle y edición de un evento propio. |
 | GET/POST | `/api/eventos/{id}/subtareas/` | Token | Gestiones de un evento propio. |
 | GET/POST | `/api/subtareas/` | Token | Lista o crea gestiones propias. |
 | GET/PUT/PATCH/DELETE | `/api/subtareas/{id}/` | Token | Detalle y edición de una gestión propia. |
+| PATCH | `/api/subtareas/{id}/reprogramar/` | Token | Reprograma una gestión evaluando sobrecarga diaria; responde 409 Conflict si supera el límite. |
+| POST | `/api/subtareas/{id}/resolver-conflicto/` | Token | Resuelve sobrecarga aplicando estrategia (`mover_otro_dia` o `reducir_horas`). |
 | GET | `/api/hoy/` | Token | Gestiones agrupadas en `vencidas`, `para_hoy` y `proximas`, ordenadas por fecha y menor esfuerzo. Filtros: `?evento=<id>` y `?estado=abiertas\|pendiente\|en_progreso\|hecho\|todas`. |
 | GET | `/api/health` | Pública | Salud del servicio (usada por Render). |
 | GET | `/api/docs/` | Pública | Swagger UI. |

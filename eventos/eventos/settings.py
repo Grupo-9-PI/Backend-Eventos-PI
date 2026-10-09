@@ -182,8 +182,9 @@ SPECTACULAR_SETTINGS = {
     'SERVE_INCLUDE_SCHEMA': False,
     'TAGS': [
         {'name': 'auth', 'description': 'Registro, login y sesión del organizador. Login y registro no requieren token.'},
+        {'name': 'configuracion', 'description': 'Configuración de límites diarios y preferencias del organizador. Requiere token.'},
         {'name': 'hoy', 'description': 'Gestiones agrupadas para la vista Hoy. Requiere token.'},
         {'name': 'eventos', 'description': 'CRUD de eventos y sus gestiones. Todas las rutas requieren token.'},
-        {'name': 'subtareas', 'description': 'CRUD de gestiones. Todas las rutas requieren token.'},
+        {'name': 'subtareas', 'description': 'CRUD de gestiones, reprogramación y resolución de sobrecargas. Todas las rutas requieren token.'},
     ],
 }
