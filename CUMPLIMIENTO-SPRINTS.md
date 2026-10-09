@@ -2,7 +2,8 @@
 
 Este documento describe, para el repositorio **Backend-Eventos-PI**, todo lo que ya está
 implementado y verificado en relación con los criterios de los sprints 0, 1, 2 y 3. Las ramas de
-trabajo han sido `feature/sprint-auth-hoy` y `feat/backend-limites-horas`.
+trabajo han sido `feature/sprint-auth-hoy`, `feat/backend-limites-horas` y
+`feature/sprint3-capacidad-conflictos`.
 
 Rama de integración en el frontend: `feature/sprint-hoy-wiring` (documentada en su propio
 `CUMPLIMIENTO-SPRINTS.md`).
@@ -98,7 +99,6 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
 | Duración del evento > 0 | "La duración del evento debe ser mayor a 0 horas." |
 | Límite diario > 0 | "El límite diario debe ser mayor a 0 horas." |
 | Estimación > 0 | "La estimación debe ser mayor a 0 horas." |
-| Plazo ≤ inicio del evento | "El plazo de la gestión debe ser anterior o igual al inicio del evento." |
 | Credenciales inválidas | "Credenciales inválidas." |
 | Correo duplicado | "Ya existe una cuenta registrada con este correo." |
 
@@ -172,7 +172,7 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
   configuración por defecto al registrar cada usuario.
 - Endpoints transaccionales:
   - `GET /api/config/`: consulta el límite actual (si no existe registro, lo inicializa en 6.00h).
-  - `PUT /api/config/`: actualización total del límite con validación de rango (0 < límite ≤ 24).
+  - `PUT /api/config/`: actualización total del límite con validación de rango (1 ≤ límite ≤ 16).
   - `PATCH /api/config/`: actualización parcial del límite.
 - Enriquecimiento de sesión: `GET /api/auth/me/` incluye `limite_diario_horas` directamente en la
   carga útil del organizador, tipado con `@extend_schema_field`.
@@ -181,13 +181,16 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
 
 - Acción `PATCH /api/subtareas/{id}/reprogramar/` con soporte de parámetros `plazo`, `hora_limite`
   (opcional) y `estimacion_horas` (opcional).
-- **Algoritmo de cálculo de sobrecarga (`_calcular_sobrecarga`):**
+- **Algoritmo de cálculo de sobrecarga (`_cifras_dia` / `_calcular_sobrecarga`):**
   1. Obtiene el límite configurado del organizador autenticado.
-  2. Suma las estimaciones de horas de todas las gestiones del organizador en la fecha destino,
-     excluyendo la gestión actual para evitar conteo doble.
+  2. Suma las estimaciones de horas de todas las gestiones **abiertas** del organizador en la fecha
+     destino (excluye las marcadas como `hecho`), excluyendo la gestión actual para evitar conteo doble.
   3. Suma la nueva estimación y calcula el exceso proyectado (`proyectadas - limite`).
   4. Si `exceso > 0`, **aborta la transacción** sin alterar la base de datos y responde con
      **HTTP 409 Conflict**.
+- **Fechas sugeridas (`_sugerir_fechas`):** el 409 incluye hasta 3 días próximos (horizonte de 90
+  días) en los que la gestión cabe dentro del límite, para que el organizador resuelva el conflicto
+  con un clic.
 - Estructura JSON del conflicto estructurada para consumo directo del frontend:
   ```json
   {
@@ -200,7 +203,10 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
     "horas_nueva_gestion": "2.50",
     "horas_totales_proyectadas": "7.50",
     "horas_exceso": "1.50",
-    "estrategias_disponibles": ["mover_otro_dia", "reducir_horas"]
+    "estrategias_disponibles": ["mover_otro_dia", "reducir_horas"],
+    "fechas_sugeridas": [
+      {"fecha": "2026-10-21", "horas_totales_proyectadas": "2.50"}
+    ]
   }
   ```
 
@@ -209,6 +215,10 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
 - Endpoint `POST /api/subtareas/{id}/resolver-conflicto/` que recibe `estrategia`:
   - **`mover_otro_dia`**: recibe `plazo` y opcionalmente `hora_limite`; aplica el nuevo plazo atómicamente.
   - **`reducir_horas`**: recibe `estimacion_horas`; reduce la duración estimada manteniendo la fecha.
+- **Recálculo posterior:** tras aplicar la estrategia, el servidor recalcula el día destino y responde
+  `resuelto: true/false` junto con `limite_horas`, `horas_totales_proyectadas`, `horas_exceso` y, si el
+  conflicto persiste, nuevas `fechas_sugeridas`. Así el frontend puede confirmar que el plan quedó
+  viable o informar que el exceso continúa.
 - Validación de parámetros obligatorios según la estrategia elegida (responde 400 con mensaje claro
   si faltan campos requeridos).
 - Aislamiento estricto: responde 404 si la gestión pertenece a otro organizador.
@@ -224,11 +234,9 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
 
 | Regla | Código HTTP | Mensaje / Estructura |
 | --- | --- | --- |
-| Límite diario menor o igual a 0 | 400 Bad Request | "El límite diario debe ser mayor a 0 horas." |
-| Límite diario mayor a 24h | 400 Bad Request | "El límite diario no puede superar las 24 horas." |
+| Límite diario fuera del rango 1–16 | 400 Bad Request | "El límite diario debe estar entre 1 y 16 horas." |
 | Estimación de horas menor o igual a 0 | 400 Bad Request | "La estimación debe ser mayor a 0 horas." |
-| Sobrecarga diaria al reprogramar | 409 Conflict | JSON estructurado con `codigo: SOBRECARGA_DIARIA`, métricas del exceso y `estrategias_disponibles`. |
-| Plazo de gestión posterior al evento | 400 Bad Request | "El plazo de la gestión debe ser anterior o igual al inicio del evento." |
+| Sobrecarga diaria al reprogramar | 409 Conflict | JSON estructurado con `codigo: SOBRECARGA_DIARIA`, métricas del exceso, `estrategias_disponibles` y `fechas_sugeridas`. |
 | Estrategia `mover_otro_dia` sin plazo | 400 Bad Request | "Se requiere 'plazo' para la estrategia 'mover_otro_dia'." |
 | Estrategia `reducir_horas` sin estimación | 400 Bad Request | "Se requiere 'estimacion_horas' para la estrategia 'reducir_horas'." |
 | Operación en gestión ajena | 404 Not Found | "Gestión no encontrada o no te pertenece." |
@@ -251,14 +259,18 @@ Detalle de cada uno de los archivos modificados en el repositorio:
      PostgreSQL (Supabase/Render) y SQLite local.
 4. **`eventos/api/serializers.py`**:
    - Serializadores creados: `ConfiguracionOrganizadorSerializer`, `ReprogramarTareaSerializer`,
-     `ResolverConflictoSerializer`, `DetalleConflictoSerializer`, `ErrorConflictoSerializer`.
+     `ResolverConflictoSerializer`, `FechaSugeridaSerializer`, `DetalleConflictoSerializer`,
+     `ErrorConflictoSerializer` y `ResolverConflictoRespuestaSerializer`.
+   - Validación de rango del límite diario entre 1 y 16 horas.
    - Modificación de `UsuarioSerializer` para exponer `limite_diario_horas` con anotación
      `@extend_schema_field(serializers.CharField())` para OpenAPI.
 5. **`eventos/api/views.py`**:
    - Implementación de `ConfiguracionOrganizadorView` (GET, PUT, PATCH).
-   - Implementación del helper `_calcular_sobrecarga` y `_obtener_limite_organizador`.
+   - Implementación de los helpers `_obtener_limite_organizador`, `_cifras_dia`, `_calcular_sobrecarga`
+     (excluye gestiones hechas) y `_sugerir_fechas` (hasta 3 días viables en 90 días).
    - Adición de la acción `reprogramar` en `SubtareaViewSet` con retorno HTTP 409 y atomicidad.
-   - Creación de `ResolverConflictoView` para aplicar resoluciones por estrategia.
+   - Creación de `ResolverConflictoView` que aplica la estrategia y **recalcula** el día destino,
+     respondiendo `resuelto`, totales y nuevas sugerencias.
    - Documentación exhaustiva con decoradores `@extend_schema`, esquemas de respuesta 200/400/409 y
      ejemplos representativos.
 6. **`eventos/api/urls.py`**:
@@ -266,8 +278,8 @@ Detalle de cada uno de los archivos modificados en el repositorio:
    - Registro de ruta `api/subtareas/<pk>/resolver-conflicto/`.
    - El router registra automáticamente la acción `api/subtareas/<pk>/reprogramar/`.
 7. **`eventos/api/tests.py`**:
-   - Incorporación de 20 tests adicionales en 3 suites: `ConfiguracionTests` (8),
-     `ReprogramarTests` (6) y `ResolverConflictoTests` (6).
+   - 27 tests en 3 suites: `ConfiguracionTests` (11), `ReprogramarTests` (8) y
+     `ResolverConflictoTests` (8).
 8. **`eventos/eventos/settings.py`**:
    - Actualización de `SPECTACULAR_SETTINGS['TAGS']` con la etiqueta y descripción del módulo
      `configuracion`.
@@ -289,21 +301,24 @@ Detalle de cada uno de los archivos modificados en el repositorio:
 
 ## Evidencia técnica consolidada
 
-- **43 tests** en `eventos/api/tests.py` (todos ejecutándose con éxito en SQLite local):
-  - `AutenticacionTests` (7): 401 sin token, registro, correo duplicado, contraseña débil,
+- **50 tests** en `eventos/api/tests.py` (todos ejecutándose con éxito en SQLite local):
+  - `AutenticacionTests` (8): 401 sin token, registro, correo duplicado, contraseña débil,
     login válido/inválido, `me` y `logout`.
   - `AislamientoTests` (7): listados, detalle, edición, eliminación y gestiones entre cuentas;
     el dueño se asigna desde la sesión.
-  - `HoyTests` (9): agrupación por fecha y hora, orden por esfuerzo, filtros, códigos de error y
+  - `HoyTests` (8): agrupación por fecha y hora, orden por esfuerzo, filtros, códigos de error y
     aislamiento; con reloj fijo para resultados deterministas.
-  - `ConfiguracionTests` (8): GET del límite por defecto (6h), PUT/PATCH de actualización,
-    validación de cero, negativo y > 24h, token requerido, y exposición en `/api/auth/me/`.
-  - `ReprogramarTests` (6): reprogramación exitosa sin sobrecarga (200), detección de sobrecarga
-    con cifras exactas (409), no mutación de la BD tras aborto 409, reprogramación con reducción
-    de horas que evita sobrecarga, token requerido, y protección contra gestiones ajenas (404).
-  - `ResolverConflictoTests` (6): estrategia `mover_otro_dia`, estrategia `reducir_horas`,
-    validación de campos obligatorios faltantes (400), protección contra gestiones ajenas (404),
-    y token requerido (401).
+  - `ConfiguracionTests` (11): GET del límite por defecto (6h), PUT/PATCH de actualización,
+    rango 1–16 (rechaza 0.5 y 17, acepta 1 y 16), independencia por organizador, token requerido
+    y exposición en `/api/auth/me/`.
+  - `ReprogramarTests` (8): reprogramación exitosa sin sobrecarga (200), detección de sobrecarga
+    con cifras exactas (409), no mutación de la BD tras aborto 409, reducción de horas que evita
+    sobrecarga, `fechas_sugeridas` válidas dentro del límite, las gestiones hechas no suman en la
+    carga del día, token requerido y protección contra gestiones ajenas (404).
+  - `ResolverConflictoTests` (8): estrategia `mover_otro_dia`, estrategia `reducir_horas`,
+    reducción que aún excede (resuelto false + nuevas sugerencias), movimiento a un día cargado
+    que persiste y reporta el conflicto, validación de campos obligatorios (400), protección
+    contra gestiones ajenas (404) y token requerido (401).
 - Esquema OpenAPI validado con `manage.py spectacular --validate` (**0 errores, 0 advertencias**).
 - Migración `api/migrations/0007_configuracion_organizador.py` aplicada y verificada.
 
