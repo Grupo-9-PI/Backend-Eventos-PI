@@ -1,3 +1,7 @@
+from decimal import Decimal
+
+from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, extend_schema
@@ -9,16 +13,44 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Evento, Subtarea
+from .models import ConfiguracionOrganizador, Evento, Subtarea
 from .serializers import (
+    ConfiguracionOrganizadorSerializer,
+    ErrorConflictoSerializer,
     EventoSerializer,
     LoginSerializer,
     RegistroSerializer,
+    ReprogramarTareaSerializer,
+    ResolverConflictoSerializer,
     RespuestaAuthSerializer,
     RespuestaHoySerializer,
     SubtareaSerializer,
     UsuarioSerializer,
 )
+
+EJEMPLO_RESPUESTA_CONFLICTO = {
+    "conflicto": True,
+    "codigo": "SOBRECARGA_DIARIA",
+    "mensaje": (
+        "Sobrecarga de trabajo detectada para el día 2026-10-15. "
+        "El límite diario es de 6.00h y con esta gestión acumularías 7.50h, superando el límite por 1.50h."
+    ),
+    "fecha": "2026-10-15",
+    "limite_horas": "6.00",
+    "horas_actuales": "5.00",
+    "horas_nueva_gestion": "2.50",
+    "horas_totales_proyectadas": "7.50",
+    "horas_exceso": "1.50",
+    "estrategias_disponibles": ["mover_otro_dia", "reducir_horas"],
+    "detalles": {
+        "fecha": "2026-10-15",
+        "limite_horas": "6.00",
+        "horas_actuales": "5.00",
+        "horas_nueva_gestion": "2.50",
+        "horas_totales_proyectadas": "7.50",
+        "horas_exceso": "1.50",
+    },
+}
 
 EJEMPLO_TAREA_VENCIDA = {
     "id": 12,
@@ -165,6 +197,89 @@ class MeView(APIView):
 
 
 # ---------------------------------------------------------------------------
+# Configuración del organizador (Límite diario de horas)
+# ---------------------------------------------------------------------------
+
+class ConfiguracionOrganizadorView(APIView):
+    @extend_schema(
+        tags=['configuracion'],
+        summary='Consultar límite diario de horas del organizador',
+        description=(
+            'Devuelve el límite diario configurable de horas de gestión para el organizador autenticado. '
+            'Por defecto es 6.00 horas.'
+        ),
+        responses={200: ConfiguracionOrganizadorSerializer},
+        examples=[
+            OpenApiExample(
+                'Límite actual',
+                value={"limite_diario_horas": "6.00"},
+                response_only=True,
+            )
+        ],
+    )
+    def get(self, request):
+        config, _ = ConfiguracionOrganizador.objects.get_or_create(usuario=request.user)
+        return Response(ConfiguracionOrganizadorSerializer(config).data)
+
+    @extend_schema(
+        tags=['configuracion'],
+        summary='Actualizar límite diario de horas del organizador',
+        description='Actualiza el límite diario de horas de gestión para el organizador autenticado.',
+        request=ConfiguracionOrganizadorSerializer,
+        responses={
+            200: ConfiguracionOrganizadorSerializer,
+            400: OpenApiTypes.OBJECT,
+        },
+        examples=[
+            OpenApiExample(
+                'Definir nuevo límite a 8h',
+                value={"limite_diario_horas": "8.00"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Respuesta de actualización',
+                value={"limite_diario_horas": "8.00"},
+                response_only=True,
+            ),
+        ],
+    )
+    def put(self, request):
+        return self._guardar(request, partial=False)
+
+    @extend_schema(
+        tags=['configuracion'],
+        summary='Actualizar parcialmente límite diario de horas',
+        description='Actualiza parcialmente el límite diario de horas de gestión para el organizador autenticado.',
+        request=ConfiguracionOrganizadorSerializer,
+        responses={
+            200: ConfiguracionOrganizadorSerializer,
+            400: OpenApiTypes.OBJECT,
+        },
+        examples=[
+            OpenApiExample(
+                'Actualización parcial a 7.5h',
+                value={"limite_diario_horas": "7.50"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Respuesta de actualización parcial',
+                value={"limite_diario_horas": "7.50"},
+                response_only=True,
+            ),
+        ],
+    )
+    def patch(self, request):
+        return self._guardar(request, partial=True)
+
+    def _guardar(self, request, partial=False):
+        config, _ = ConfiguracionOrganizador.objects.get_or_create(usuario=request.user)
+        serializer = ConfiguracionOrganizadorSerializer(config, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
 # Vista Hoy (C2 y C5)
 # ---------------------------------------------------------------------------
 
@@ -271,6 +386,52 @@ class HoyView(APIView):
 # Eventos y gestiones (aislados por organizador)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Helpers de validación de sobrecarga diaria
+# ---------------------------------------------------------------------------
+
+def _obtener_limite_organizador(usuario):
+    """Devuelve el límite diario (Decimal) del organizador, creando su config si no existe."""
+    config, _ = ConfiguracionOrganizador.objects.get_or_create(usuario=usuario)
+    return config.limite_diario_horas
+
+
+def _calcular_sobrecarga(usuario, fecha_nueva, estimacion_nueva, excluir_subtarea_id=None):
+    """
+    Calcula si al asignar `estimacion_nueva` horas al día `fecha_nueva` se supera
+    el límite diario del organizador.
+
+    Devuelve un dict con cifras si hay sobrecarga, o None si no la hay.
+    """
+    limite = _obtener_limite_organizador(usuario)
+    qs = Subtarea.objects.filter(
+        evento__propietario=usuario,
+        plazo=fecha_nueva,
+    )
+    if excluir_subtarea_id is not None:
+        qs = qs.exclude(pk=excluir_subtarea_id)
+
+    horas_actuales = qs.aggregate(total=Sum('estimacion_horas'))['total'] or Decimal('0')
+    estimacion_nueva = Decimal(str(estimacion_nueva))
+    horas_proyectadas = horas_actuales + estimacion_nueva
+    exceso = horas_proyectadas - limite
+
+    if exceso > 0:
+        return {
+            'fecha': fecha_nueva,
+            'limite_horas': limite,
+            'horas_actuales': horas_actuales,
+            'horas_nueva_gestion': estimacion_nueva,
+            'horas_totales_proyectadas': horas_proyectadas,
+            'horas_exceso': exceso,
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Eventos y gestiones (aislados por organizador)
+# ---------------------------------------------------------------------------
+
 class EventoViewSet(viewsets.ModelViewSet):
     # El atributo queryset permite a drf-spectacular tipar el parámetro id del esquema.
     queryset = Evento.objects.all()
@@ -324,3 +485,180 @@ class SubtareaViewSet(viewsets.ModelViewSet):
         if evento.propietario_id != self.request.user.id:
             raise PermissionDenied('No puedes agregar gestiones a un evento que no te pertenece.')
         serializer.save()
+
+    @extend_schema(
+        tags=['subtareas'],
+        summary='Reprogramar una gestión (con detección de sobrecarga)',
+        description=(
+            'Cambia el plazo, hora límite y/o estimación de horas de una gestión.\n\n'
+            '**Lógica de sobrecarga:** si la nueva fecha ya acumula más horas que el límite '
+            'diario del organizador (configurable en `/api/config/`), el servidor **aborta la '
+            'transacción** y devuelve `409 Conflict` con las cifras exactas del exceso para que '
+            'el frontend pueda mostrar un diálogo de conflicto comprensible al usuario.\n\n'
+            'Si no hay sobrecarga, persiste el cambio y devuelve la gestión actualizada.'
+        ),
+        request=ReprogramarTareaSerializer,
+        responses={
+            200: SubtareaSerializer,
+            400: OpenApiTypes.OBJECT,
+            409: ErrorConflictoSerializer,
+        },
+        examples=[
+            OpenApiExample(
+                'Reprogramar a otro día',
+                value={"plazo": "2026-10-20", "hora_limite": "15:00"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Reprogramar también con nueva estimación',
+                value={"plazo": "2026-10-20", "hora_limite": "15:00", "estimacion_horas": "2.50"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Respuesta exitosa (sin conflicto)',
+                value={
+                    "id": 7,
+                    "evento": 3,
+                    "gestion": "Confirmar menú con el catering",
+                    "categoria": "CATERING",
+                    "estado": "pendiente",
+                    "prioridad": "alta",
+                    "estimacion_horas": "2.50",
+                    "plazo": "2026-10-20",
+                    "hora_limite": "15:00:00",
+                    "hora_inicio": None,
+                },
+                response_only=True,
+                status_codes=['200'],
+            ),
+            OpenApiExample(
+                '409 Conflict — sobrecarga detectada',
+                value=EJEMPLO_RESPUESTA_CONFLICTO,
+                response_only=True,
+                status_codes=['409'],
+            ),
+        ],
+    )
+    @action(detail=True, methods=['patch'], url_path='reprogramar')
+    def reprogramar(self, request, pk=None):
+        subtarea = self.get_object()  # 404 si es de otro organizador
+        ser = ReprogramarTareaSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        datos = ser.validated_data
+
+        fecha_nueva = datos.get('plazo', subtarea.plazo)
+        estimacion_nueva = datos.get('estimacion_horas', subtarea.estimacion_horas)
+
+        # Verificar sobrecarga: excluimos la subtarea actual para no contarla dos veces
+        conflicto = _calcular_sobrecarga(
+            usuario=request.user,
+            fecha_nueva=fecha_nueva,
+            estimacion_nueva=estimacion_nueva,
+            excluir_subtarea_id=subtarea.pk,
+        )
+        if conflicto:
+            limite = conflicto['limite_horas']
+            proyectadas = conflicto['horas_totales_proyectadas']
+            exceso = conflicto['horas_exceso']
+            cuerpo = {
+                'conflicto': True,
+                'codigo': 'SOBRECARGA_DIARIA',
+                'mensaje': (
+                    f"Sobrecarga detectada para el {fecha_nueva.strftime('%d/%m/%Y')}. "
+                    f"Tu límite diario es de {limite}h y con esta gestión acumularías "
+                    f"{proyectadas}h, superando el límite por {exceso}h. "
+                    f"Elige una estrategia para resolver el conflicto."
+                ),
+                **conflicto,
+                'estrategias_disponibles': ['mover_otro_dia', 'reducir_horas'],
+            }
+            return Response(cuerpo, status=status.HTTP_409_CONFLICT)
+
+        # Sin conflicto: persistir el cambio atómicamente
+        with transaction.atomic():
+            if 'plazo' in datos:
+                subtarea.plazo = datos['plazo']
+            if 'hora_limite' in datos:
+                subtarea.hora_limite = datos['hora_limite']
+            if 'estimacion_horas' in datos:
+                subtarea.estimacion_horas = datos['estimacion_horas']
+            subtarea.save()
+
+        return Response(SubtareaSerializer(subtarea, context={'request': request}).data)
+
+
+# ---------------------------------------------------------------------------
+# Reprogramar con fuerza / resolución de conflicto elegida por el usuario
+# ---------------------------------------------------------------------------
+
+class ResolverConflictoView(APIView):
+    @extend_schema(
+        tags=['subtareas'],
+        summary='Resolver conflicto de sobrecarga con una estrategia',
+        description=(
+            'Aplica la estrategia elegida por el organizador para resolver el conflicto de '
+            'sobrecarga detectado al reprogramar.\n\n'
+            '**Estrategias disponibles:**\n'
+            '- `mover_otro_dia`: mueve la gestión al `plazo` indicado (sin verificar de nuevo).\n'
+            '- `reducir_horas`: cambia la `estimacion_horas` de la gestión al valor indicado; '
+            'mantiene el plazo original.\n\n'
+            'Ambas estrategias persisten el cambio y devuelven la gestión actualizada.'
+        ),
+        request=ResolverConflictoSerializer,
+        responses={
+            200: SubtareaSerializer,
+            400: OpenApiTypes.OBJECT,
+            404: OpenApiTypes.OBJECT,
+        },
+        examples=[
+            OpenApiExample(
+                'Estrategia: mover a otro día',
+                value={"estrategia": "mover_otro_dia", "plazo": "2026-10-22", "hora_limite": "10:00"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Estrategia: reducir horas',
+                value={"estrategia": "reducir_horas", "estimacion_horas": "1.00"},
+                request_only=True,
+            ),
+        ],
+    )
+    def post(self, request, pk):
+        # Verificar que la gestión pertenece al organizador autenticado
+        try:
+            subtarea = Subtarea.objects.select_related('evento').get(
+                pk=pk, evento__propietario=request.user
+            )
+        except Subtarea.DoesNotExist:
+            return Response(
+                {'detail': 'Gestión no encontrada o no te pertenece.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        ser = ResolverConflictoSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        datos = ser.validated_data
+        estrategia = datos['estrategia']
+
+        with transaction.atomic():
+            if estrategia == 'mover_otro_dia':
+                if 'plazo' not in datos:
+                    return Response(
+                        {'plazo': "Se requiere 'plazo' para la estrategia 'mover_otro_dia'."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                subtarea.plazo = datos['plazo']
+                if 'hora_limite' in datos:
+                    subtarea.hora_limite = datos['hora_limite']
+
+            elif estrategia == 'reducir_horas':
+                if 'estimacion_horas' not in datos:
+                    return Response(
+                        {'estimacion_horas': "Se requiere 'estimacion_horas' para la estrategia 'reducir_horas'."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                subtarea.estimacion_horas = datos['estimacion_horas']
+
+            subtarea.save()
+
+        return Response(SubtareaSerializer(subtarea, context={'request': request}).data)

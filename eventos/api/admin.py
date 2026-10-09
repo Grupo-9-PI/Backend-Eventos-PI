@@ -1,6 +1,12 @@
 from django.contrib import admin
 
-from .models import Evento, Subtarea
+from .models import Evento, Subtarea, ConfiguracionOrganizador
+
+
+@admin.register(ConfiguracionOrganizador)
+class ConfiguracionOrganizadorAdmin(admin.ModelAdmin):
+    list_display = ('usuario', 'limite_diario_horas', 'actualizado_en')
+    search_fields = ('usuario__username', 'usuario__email')
 
 
 @admin.register(Evento)

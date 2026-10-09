@@ -1,10 +1,11 @@
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as ErrorDeDjango
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 
-from .models import Evento, Subtarea
+from .models import ConfiguracionOrganizador, Evento, Subtarea
 
 Usuario = get_user_model()
 
@@ -15,10 +16,18 @@ Usuario = get_user_model()
 
 class UsuarioSerializer(serializers.ModelSerializer):
     nombre = serializers.CharField(source='first_name')
+    limite_diario_horas = serializers.SerializerMethodField()
 
     class Meta:
         model = Usuario
-        fields = ['id', 'nombre', 'email']
+        fields = ['id', 'nombre', 'email', 'limite_diario_horas']
+
+    @extend_schema_field(serializers.CharField())
+    def get_limite_diario_horas(self, obj):
+        config = getattr(obj, 'configuracion', None)
+        if config is None:
+            config, _ = ConfiguracionOrganizador.objects.get_or_create(usuario=obj)
+        return str(config.limite_diario_horas)
 
 
 class RegistroSerializer(serializers.Serializer):
@@ -178,3 +187,98 @@ class RespuestaHoySerializer(serializers.Serializer):
     total = serializers.IntegerField()
     filtros = FiltrosHoySerializer()
     grupos = GruposHoySerializer()
+
+
+# ---------------------------------------------------------------------------
+# Configuración del organizador (Límite diario de horas)
+# ---------------------------------------------------------------------------
+
+class ConfiguracionOrganizadorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConfiguracionOrganizador
+        fields = ['limite_diario_horas']
+
+    def validate_limite_diario_horas(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("El límite diario debe ser mayor a 0 horas.")
+        if value > 24:
+            raise serializers.ValidationError("El límite diario no puede superar las 24 horas.")
+        return value
+
+
+# ---------------------------------------------------------------------------
+# Reprogramación y resolución de conflictos de sobrecarga
+# ---------------------------------------------------------------------------
+
+class ReprogramarTareaSerializer(serializers.Serializer):
+    plazo = serializers.DateField(
+        help_text="Nueva fecha límite (plazo) para la gestión (YYYY-MM-DD)."
+    )
+    hora_limite = serializers.TimeField(
+        required=False,
+        help_text="Nueva hora límite (opcional)."
+    )
+    estimacion_horas = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        help_text="Nueva estimación de horas (opcional, debe ser > 0)."
+    )
+
+    def validate_estimacion_horas(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError("La estimación debe ser mayor a 0 horas.")
+        return value
+
+
+class ResolverConflictoSerializer(serializers.Serializer):
+    estrategia = serializers.ChoiceField(
+        choices=[
+            ('mover_otro_dia', 'Mover a otro día'),
+            ('reducir_horas', 'Reducir horas estimadas'),
+        ],
+        help_text="Estrategia seleccionada para resolver el conflicto de sobrecarga.",
+    )
+    plazo = serializers.DateField(
+        required=False,
+        help_text="Nueva fecha si la estrategia es 'mover_otro_dia' (YYYY-MM-DD).",
+    )
+    hora_limite = serializers.TimeField(
+        required=False,
+        help_text="Nueva hora límite (opcional).",
+    )
+    estimacion_horas = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        help_text="Horas estimadas reducidas si la estrategia es 'reducir_horas'.",
+    )
+
+    def validate_estimacion_horas(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError("La estimación debe ser mayor a 0 horas.")
+        return value
+
+
+class DetalleConflictoSerializer(serializers.Serializer):
+    fecha = serializers.DateField()
+    limite_horas = serializers.DecimalField(max_digits=4, decimal_places=2)
+    horas_actuales = serializers.DecimalField(max_digits=5, decimal_places=2)
+    horas_nueva_gestion = serializers.DecimalField(max_digits=5, decimal_places=2)
+    horas_totales_proyectadas = serializers.DecimalField(max_digits=5, decimal_places=2)
+    horas_exceso = serializers.DecimalField(max_digits=5, decimal_places=2)
+
+
+class ErrorConflictoSerializer(serializers.Serializer):
+    conflicto = serializers.BooleanField(default=True)
+    codigo = serializers.CharField(default="SOBRECARGA_DIARIA")
+    mensaje = serializers.CharField()
+    fecha = serializers.DateField()
+    limite_horas = serializers.DecimalField(max_digits=4, decimal_places=2)
+    horas_actuales = serializers.DecimalField(max_digits=5, decimal_places=2)
+    horas_nueva_gestion = serializers.DecimalField(max_digits=5, decimal_places=2)
+    horas_totales_proyectadas = serializers.DecimalField(max_digits=5, decimal_places=2)
+    horas_exceso = serializers.DecimalField(max_digits=5, decimal_places=2)
+    estrategias_disponibles = serializers.ListField(child=serializers.CharField())
+    detalles = DetalleConflictoSerializer(required=False)
+

@@ -1,8 +1,8 @@
 # Cumplimiento de criterios por Sprint — Backend
 
 Este documento describe, para el repositorio **Backend-Eventos-PI**, todo lo que ya está
-implementado y verificado en relación con los criterios de los sprints 0, 1 y 2. La rama de
-trabajo es `feature/sprint-auth-hoy`.
+implementado y verificado en relación con los criterios de los sprints 0, 1, 2 y 3. Las ramas de
+trabajo han sido `feature/sprint-auth-hoy` y `feat/backend-limites-horas`.
 
 Rama de integración en el frontend: `feature/sprint-hoy-wiring` (documentada en su propio
 `CUMPLIMIENTO-SPRINTS.md`).
@@ -151,24 +151,169 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
 
 ---
 
+## Sprint 3 — Reprogramación, sobrecarga y resolución de conflictos
+
+### Análisis de responsabilidades: backend vs. frontend
+
+| # | Requerimiento | Responsable | Justificación arquitectural |
+| --- | --- | --- | --- |
+| 1 | Reprogramar gestiones: cambio de plazo/fecha persiste y se refleja en `/hoy` | **Backend** | Transaccionalidad de BD y recálculo en la agrupación temporal de `/api/hoy/`. |
+| 2 | Límite diario configurable de horas: set/get + default 6h por organizador | **Backend** | Modelo de datos por usuario, persistencia relacional y endpoints de configuración. |
+| 3 | Conflicto estándar: detecta sobrecarga diaria al reprogramar con cifras | **Backend** | Agregación de horas del día, aborto atómico y contrato JSON HTTP 409 con métricas. |
+| 4 | Resolución de conflicto: ≥1 estrategia funcional (mover día / reducir horas) | **Backend** | Endpoints de mutación controlada para aplicar la estrategia seleccionada. |
+| 5 | Calidad IxD: diálogo de conflicto con opciones comprensibles sin jerga técnica | **Frontend** | Interfaz de usuario, modal interactivo y redacción UX basada en el JSON del 409. |
+| 6 | Evidencia UX/HCI (prevención de errores) + endpoints documentados + bitácora | **Compartido** | Backend aporta esquemas OpenAPI, prevención de integridad y bitácora técnica; Frontend aporta bitácora UX. |
+
+### C1 — Límite diario configurable por organizador (set/get + default 6h)
+
+- Modelo `ConfiguracionOrganizador` con relación `OneToOneField` a `auth.User`, campo
+  `limite_diario_horas` con `default=Decimal('6.00')`.
+- Señal Django `post_save` (`asegurar_configuracion_organizador`): crea automáticamente la
+  configuración por defecto al registrar cada usuario.
+- Endpoints transaccionales:
+  - `GET /api/config/`: consulta el límite actual (si no existe registro, lo inicializa en 6.00h).
+  - `PUT /api/config/`: actualización total del límite con validación de rango (0 < límite ≤ 24).
+  - `PATCH /api/config/`: actualización parcial del límite.
+- Enriquecimiento de sesión: `GET /api/auth/me/` incluye `limite_diario_horas` directamente en la
+  carga útil del organizador, tipado con `@extend_schema_field`.
+
+### C2 — Detección de sobrecarga diaria al reprogramar (HTTP 409 Conflict)
+
+- Acción `PATCH /api/subtareas/{id}/reprogramar/` con soporte de parámetros `plazo`, `hora_limite`
+  (opcional) y `estimacion_horas` (opcional).
+- **Algoritmo de cálculo de sobrecarga (`_calcular_sobrecarga`):**
+  1. Obtiene el límite configurado del organizador autenticado.
+  2. Suma las estimaciones de horas de todas las gestiones del organizador en la fecha destino,
+     excluyendo la gestión actual para evitar conteo doble.
+  3. Suma la nueva estimación y calcula el exceso proyectado (`proyectadas - limite`).
+  4. Si `exceso > 0`, **aborta la transacción** sin alterar la base de datos y responde con
+     **HTTP 409 Conflict**.
+- Estructura JSON del conflicto estructurada para consumo directo del frontend:
+  ```json
+  {
+    "conflicto": true,
+    "codigo": "SOBRECARGA_DIARIA",
+    "mensaje": "Sobrecarga detectada para el 20/10/2026. Tu límite diario es de 6.00h y con esta gestión acumularías 7.50h, superando el límite por 1.50h. Elige una estrategia para resolver el conflicto.",
+    "fecha": "2026-10-20",
+    "limite_horas": "6.00",
+    "horas_actuales": "5.00",
+    "horas_nueva_gestion": "2.50",
+    "horas_totales_proyectadas": "7.50",
+    "horas_exceso": "1.50",
+    "estrategias_disponibles": ["mover_otro_dia", "reducir_horas"]
+  }
+  ```
+
+### C3 — Resolución de conflictos con estrategias funcionales
+
+- Endpoint `POST /api/subtareas/{id}/resolver-conflicto/` que recibe `estrategia`:
+  - **`mover_otro_dia`**: recibe `plazo` y opcionalmente `hora_limite`; aplica el nuevo plazo atómicamente.
+  - **`reducir_horas`**: recibe `estimacion_horas`; reduce la duración estimada manteniendo la fecha.
+- Validación de parámetros obligatorios según la estrategia elegida (responde 400 con mensaje claro
+  si faltan campos requeridos).
+- Aislamiento estricto: responde 404 si la gestión pertenece a otro organizador.
+
+### C4 — Persistencia y reflejo en `/hoy/`
+
+- Al reprogramar exitosamente sin conflicto (o tras resolverlo), la actualización persiste en
+  PostgreSQL / SQLite de manera atómica (`transaction.atomic`).
+- La vista `/api/hoy/` reagrupa inmediatamente la gestión en `vencidas`, `para_hoy` o `proximas` de
+  acuerdo con el nuevo plazo y hora límite.
+
+### C5 — Validaciones backend y prevención de errores
+
+| Regla | Código HTTP | Mensaje / Estructura |
+| --- | --- | --- |
+| Límite diario menor o igual a 0 | 400 Bad Request | "El límite diario debe ser mayor a 0 horas." |
+| Límite diario mayor a 24h | 400 Bad Request | "El límite diario no puede superar las 24 horas." |
+| Estimación de horas menor o igual a 0 | 400 Bad Request | "La estimación debe ser mayor a 0 horas." |
+| Sobrecarga diaria al reprogramar | 409 Conflict | JSON estructurado con `codigo: SOBRECARGA_DIARIA`, métricas del exceso y `estrategias_disponibles`. |
+| Plazo de gestión posterior al evento | 400 Bad Request | "El plazo de la gestión debe ser anterior o igual al inicio del evento." |
+| Estrategia `mover_otro_dia` sin plazo | 400 Bad Request | "Se requiere 'plazo' para la estrategia 'mover_otro_dia'." |
+| Estrategia `reducir_horas` sin estimación | 400 Bad Request | "Se requiere 'estimacion_horas' para la estrategia 'reducir_horas'." |
+| Operación en gestión ajena | 404 Not Found | "Gestión no encontrada o no te pertenece." |
+| Solicitud sin autenticación | 401 Unauthorized | "Las credenciales de autenticación no se proveyeron." |
+
+### C6 — Bitácora de archivos intervenidos
+
+Detalle de cada uno de los archivos modificados en el repositorio:
+
+1. **`eventos/api/models.py`**:
+   - Creación del modelo `ConfiguracionOrganizador` con `usuario` (`OneToOneField` a `User`),
+     `limite_diario_horas` (`DecimalField(max_digits=4, decimal_places=2, default=6.00)`), marcas
+     temporales `creado_en` y `actualizado_en`.
+   - Incorporación de la señal `asegurar_configuracion_organizador` (`post_save`).
+2. **`eventos/api/admin.py`**:
+   - Registro de `ConfiguracionOrganizador` con listado de campos `usuario`, `limite_diario_horas`,
+     `actualizado_en` y búsqueda por nombre de usuario y correo.
+3. **`eventos/api/migrations/0007_configuracion_organizador.py`**:
+   - Migración Django versionada que crea la tabla `api_configuracionorganizador` compatible con
+     PostgreSQL (Supabase/Render) y SQLite local.
+4. **`eventos/api/serializers.py`**:
+   - Serializadores creados: `ConfiguracionOrganizadorSerializer`, `ReprogramarTareaSerializer`,
+     `ResolverConflictoSerializer`, `DetalleConflictoSerializer`, `ErrorConflictoSerializer`.
+   - Modificación de `UsuarioSerializer` para exponer `limite_diario_horas` con anotación
+     `@extend_schema_field(serializers.CharField())` para OpenAPI.
+5. **`eventos/api/views.py`**:
+   - Implementación de `ConfiguracionOrganizadorView` (GET, PUT, PATCH).
+   - Implementación del helper `_calcular_sobrecarga` y `_obtener_limite_organizador`.
+   - Adición de la acción `reprogramar` en `SubtareaViewSet` con retorno HTTP 409 y atomicidad.
+   - Creación de `ResolverConflictoView` para aplicar resoluciones por estrategia.
+   - Documentación exhaustiva con decoradores `@extend_schema`, esquemas de respuesta 200/400/409 y
+     ejemplos representativos.
+6. **`eventos/api/urls.py`**:
+   - Registro de ruta `api/config/` para la configuración del organizador.
+   - Registro de ruta `api/subtareas/<pk>/resolver-conflicto/`.
+   - El router registra automáticamente la acción `api/subtareas/<pk>/reprogramar/`.
+7. **`eventos/api/tests.py`**:
+   - Incorporación de 20 tests adicionales en 3 suites: `ConfiguracionTests` (8),
+     `ReprogramarTests` (6) y `ResolverConflictoTests` (6).
+8. **`eventos/eventos/settings.py`**:
+   - Actualización de `SPECTACULAR_SETTINGS['TAGS']` con la etiqueta y descripción del módulo
+     `configuracion`.
+9. **`CUMPLIMIENTO-SPRINTS.md`**:
+   - Bitácora y seguimiento técnico de los criterios del Sprint 3.
+10. **`README.md`**:
+    - Actualización de la tabla de endpoints principales de la API.
+
+### Nuevas rutas agregadas
+
+| Método | Ruta | Auth | Descripción |
+| --- | --- | --- | --- |
+| GET | `/api/config/` | Token | Consulta el límite diario de horas de gestión (default 6.00h). |
+| PUT/PATCH | `/api/config/` | Token | Actualiza total o parcialmente el límite diario de horas. |
+| PATCH | `/api/subtareas/{id}/reprogramar/` | Token | Reprograma una gestión evaluando sobrecarga; responde 409 si supera el límite. |
+| POST | `/api/subtareas/{id}/resolver-conflicto/` | Token | Aplica estrategia de resolución (`mover_otro_dia` o `reducir_horas`). |
+
+---
+
 ## Evidencia técnica consolidada
 
-- **23 tests** en `eventos/api/tests.py`:
+- **43 tests** en `eventos/api/tests.py` (todos ejecutándose con éxito en SQLite local):
   - `AutenticacionTests` (7): 401 sin token, registro, correo duplicado, contraseña débil,
-    login válido/ inválido, `me` y `logout`.
+    login válido/inválido, `me` y `logout`.
   - `AislamientoTests` (7): listados, detalle, edición, eliminación y gestiones entre cuentas;
     el dueño se asigna desde la sesión.
   - `HoyTests` (9): agrupación por fecha y hora, orden por esfuerzo, filtros, códigos de error y
     aislamiento; con reloj fijo para resultados deterministas.
-- Esquema OpenAPI validado con `manage.py spectacular --validate` (0 errores, 0 advertencias).
-- Prueba de humo contra Postgres real: registro 201 → evento 201 → gestión 201 → `/api/hoy/`
-  agrupado → 401 sin token → el organizador B no ve datos del A.
+  - `ConfiguracionTests` (8): GET del límite por defecto (6h), PUT/PATCH de actualización,
+    validación de cero, negativo y > 24h, token requerido, y exposición en `/api/auth/me/`.
+  - `ReprogramarTests` (6): reprogramación exitosa sin sobrecarga (200), detección de sobrecarga
+    con cifras exactas (409), no mutación de la BD tras aborto 409, reprogramación con reducción
+    de horas que evita sobrecarga, token requerido, y protección contra gestiones ajenas (404).
+  - `ResolverConflictoTests` (6): estrategia `mover_otro_dia`, estrategia `reducir_horas`,
+    validación de campos obligatorios faltantes (400), protección contra gestiones ajenas (404),
+    y token requerido (401).
+- Esquema OpenAPI validado con `manage.py spectacular --validate` (**0 errores, 0 advertencias**).
+- Migración `api/migrations/0007_configuracion_organizador.py` aplicada y verificada.
 
 ## Pendientes y evidencia externa
 
-- Tablero Kanban, Documento Único y bitácora UX/HCI: se enlazan desde allí; este repo solo aporta
-  la API y su documentación.
+- Tablero Kanban, Documento Único y bitácora UX/HCI: se enlazan desde allí; este repo aporta
+  la API, las validaciones transaccionales y la documentación OpenAPI.
 - Recuperación de contraseña por correo: no implementada (no hay servicio de email en el alcance);
   la UI avisa que lo gestione el administrador.
 - Variables de entorno de producción en Render: `DATABASE_URL`, `SECRET_KEY`, `DEBUG=False`,
   `FRONTEND_URL`/`CORS_ALLOWED_ORIGINS`.
+
+
