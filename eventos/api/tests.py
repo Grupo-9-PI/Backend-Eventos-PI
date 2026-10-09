@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -357,9 +358,36 @@ class ConfiguracionTests(BaseAPITest):
         respuesta = self.client.put('/api/config/', {'limite_diario_horas': '-1'}, format='json')
         self.assertEqual(respuesta.status_code, 400)
 
-    def test_config_rechaza_limite_mayor_a_24h(self):
-        respuesta = self.client.put('/api/config/', {'limite_diario_horas': '25'}, format='json')
+    def test_config_rechaza_limite_menor_a_1h(self):
+        respuesta = self.client.put('/api/config/', {'limite_diario_horas': '0.50'}, format='json')
         self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('1 y 16', str(respuesta.data['limite_diario_horas']))
+
+    def test_config_rechaza_limite_mayor_a_16h(self):
+        respuesta = self.client.put('/api/config/', {'limite_diario_horas': '17'}, format='json')
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('1 y 16', str(respuesta.data['limite_diario_horas']))
+
+    def test_config_acepta_limites_del_rango(self):
+        for valor in ('1.00', '16.00'):
+            respuesta = self.client.put('/api/config/', {'limite_diario_horas': valor}, format='json')
+            self.assertEqual(respuesta.status_code, 200, valor)
+            self.assertEqual(respuesta.data['limite_diario_horas'], valor)
+
+    def test_config_es_independiente_por_usuario(self):
+        """El límite es de cada organizador: guardar en B no cambia el de A (default 6h)."""
+        beto = self.crear_usuario('beto@test.com', 'Beto')
+        self.autenticar(beto)
+        respuesta = self.client.put('/api/config/', {'limite_diario_horas': '4.00'}, format='json')
+        self.assertEqual(respuesta.status_code, 200)
+
+        self.autenticar(self.ana)
+        respuesta = self.client.get('/api/config/')
+        self.assertEqual(respuesta.data['limite_diario_horas'], '6.00')
+
+        self.autenticar(beto)
+        respuesta = self.client.get('/api/config/')
+        self.assertEqual(respuesta.data['limite_diario_horas'], '4.00')
 
     def test_config_requiere_token(self):
         self.client.credentials()
@@ -444,6 +472,37 @@ class ReprogramarTests(BaseAPITest):
         self.gestion.refresh_from_db()
         self.assertEqual(self.gestion.plazo, plazo_original)
 
+    def test_reprogramar_409_incluye_fechas_sugeridas_validas(self):
+        """El 409 sugiere días próximos en los que la gestión cabe dentro del límite."""
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(DIA_REPROGRAM), 'hora_limite': '10:00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 409)
+        sugeridas = respuesta.data['fechas_sugeridas']
+        self.assertTrue(sugeridas, 'Debe incluir al menos una fecha sugerida')
+        for sugerida in sugeridas:
+            self.assertLessEqual(
+                Decimal(sugerida['horas_totales_proyectadas']),
+                Decimal('6.00'),
+                sugerida,
+            )
+
+    def test_reprogramar_no_cuenta_gestiones_hechas_en_la_suma(self):
+        """Un día con 5h hechas y 0h abiertas no genera sobrecarga al mover 2h."""
+        dia_con_hechas = DIA_REPROGRAM + timedelta(days=20)
+        self.crear_tarea(
+            self.evento, dia_con_hechas, estimacion='5.00',
+            estado='hecho', titulo='Terminada',
+        )
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(dia_con_hechas), 'hora_limite': '10:00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+
     def test_reprogramar_con_reduccion_evita_conflicto(self):
         """Mover al día cargado pero reduciendo a 0.5h (total 5.5h < 6h) → 200."""
         respuesta = self.client.patch(
@@ -503,6 +562,13 @@ class ResolverConflictoTests(BaseAPITest):
         self.assertEqual(respuesta.status_code, 200)
         self.gestion.refresh_from_db()
         self.assertEqual(self.gestion.plazo, nuevo_dia)
+        # La respuesta confirma el resultado recalculado.
+        self.assertTrue(respuesta.data['resuelto'])
+        self.assertEqual(respuesta.data['subtarea']['id'], self.gestion.id)
+        self.assertLessEqual(
+            Decimal(respuesta.data['horas_totales_proyectadas']), Decimal('6.00')
+        )
+        self.assertEqual(Decimal(respuesta.data['horas_exceso']), Decimal('0'))
 
     def test_estrategia_reducir_horas_persiste_nueva_estimacion(self):
         respuesta = self.client.post(
@@ -513,6 +579,39 @@ class ResolverConflictoTests(BaseAPITest):
         self.assertEqual(respuesta.status_code, 200)
         self.gestion.refresh_from_db()
         self.assertEqual(str(self.gestion.estimacion_horas), '1.00')
+        self.assertTrue(respuesta.data['resuelto'])
+        self.assertEqual(
+            Decimal(respuesta.data['horas_totales_proyectadas']), Decimal('1.00')
+        )
+
+    def test_reducir_horas_que_aun_excede_reporta_conflicto_persistente(self):
+        """Reducir pero seguir sobre el límite: persiste el cambio y se informa."""
+        self.crear_tarea(self.evento, DIA_REPROGRAM, estimacion='5.00', titulo='Otra carga')
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'reducir_horas', 'estimacion_horas': '1.50'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertFalse(respuesta.data['resuelto'])
+        self.assertEqual(
+            Decimal(respuesta.data['horas_totales_proyectadas']), Decimal('6.50')
+        )
+        self.assertEqual(Decimal(respuesta.data['horas_exceso']), Decimal('0.50'))
+        self.assertTrue(respuesta.data['fechas_sugeridas'])
+
+    def test_mover_a_dia_cargado_reporta_conflicto_persistente(self):
+        dia_cargado = DIA_REPROGRAM + timedelta(days=2)
+        self.crear_tarea(self.evento, dia_cargado, estimacion='5.00', titulo='Otra carga')
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'mover_otro_dia', 'plazo': str(dia_cargado)},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertFalse(respuesta.data['resuelto'])
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.plazo, dia_cargado)
 
     def test_mover_otro_dia_sin_plazo_devuelve_400(self):
         respuesta = self.client.post(
