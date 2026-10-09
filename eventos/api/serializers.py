@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as ErrorDeDjango
@@ -106,12 +108,19 @@ class SubtareaSerializer(serializers.ModelSerializer):
 
 class EventoSerializer(serializers.ModelSerializer):
     subtareas = SubtareaSerializer(many=True, read_only=True)
+    horas_planificadas = serializers.SerializerMethodField()
 
     class Meta:
         model = Evento
         fields = '__all__'
         # El dueño se asigna siempre desde la sesión, nunca desde el cliente.
         read_only_fields = ['propietario', 'creado_en']
+
+    @extend_schema_field(serializers.CharField())
+    def get_horas_planificadas(self, obj):
+        """Horas de trabajo que usa el evento, calculadas a partir de sus gestiones."""
+        total = sum((t.estimacion_horas for t in obj.subtareas.all()), Decimal('0'))
+        return str(total)
 
     def validate(self, data):
         inicio = data.get('fecha_inicio', getattr(self.instance, 'fecha_inicio', None))
