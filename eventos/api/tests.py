@@ -3,7 +3,10 @@ from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
 from django.utils import timezone
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APITestCase
 
@@ -125,6 +128,76 @@ class AutenticacionTests(BaseAPITest):
         respuesta = self.client.post('/api/auth/logout/')
         self.assertEqual(respuesta.status_code, 204)
         self.assertFalse(Token.objects.filter(user=usuario).exists())
+
+
+class RecuperacionPasswordTests(BaseAPITest):
+    """Recuperación de contraseña real: enlace por correo + restablecimiento."""
+
+    def test_recuperar_con_correo_registrado_envia_el_enlace(self):
+        self.crear_usuario('ana@ejemplo.com', 'Ana')
+        with mock.patch('api.views.send_mail') as enviar:
+            respuesta = self.client.post(
+                '/api/auth/recuperar/',
+                {'email': 'ana@ejemplo.com'},
+                format='json',
+            )
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn('detail', respuesta.data)
+        enviar.assert_called_once()
+        mensaje = enviar.call_args.kwargs['message']
+        self.assertIn('/restablecer?uid=', mensaje)
+        self.assertIn('token=', mensaje)
+
+    def test_recuperar_con_correo_desconocido_no_revela_nada(self):
+        with mock.patch('api.views.send_mail') as enviar:
+            respuesta = self.client.post(
+                '/api/auth/recuperar/',
+                {'email': 'nadie@ejemplo.com'},
+                format='json',
+            )
+        self.assertEqual(respuesta.status_code, 200)
+        enviar.assert_not_called()
+
+    def test_restablecer_con_token_valido_cambia_la_contrasena(self):
+        usuario = self.crear_usuario('ana@ejemplo.com')
+        token_viejo = Token.objects.create(user=usuario)
+        uid = urlsafe_base64_encode(force_bytes(usuario.pk))
+        token = default_token_generator.make_token(usuario)
+        respuesta = self.client.post(
+            '/api/auth/restablecer/',
+            {'uid': uid, 'token': token, 'password': 'NuevaClave123'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        usuario.refresh_from_db()
+        self.assertTrue(usuario.check_password('NuevaClave123'))
+        # Las sesiones abiertas antes del cambio dejan de servir.
+        self.assertFalse(Token.objects.filter(pk=token_viejo.pk).exists())
+
+    def test_restablecer_con_token_invalido_responde_400(self):
+        usuario = self.crear_usuario('ana@ejemplo.com')
+        uid = urlsafe_base64_encode(force_bytes(usuario.pk))
+        respuesta = self.client.post(
+            '/api/auth/restablecer/',
+            {'uid': uid, 'token': 'token-invalido', 'password': 'NuevaClave123'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('token', respuesta.data)
+        usuario.refresh_from_db()
+        self.assertTrue(usuario.check_password(CLAVE))
+
+    def test_restablecer_rechaza_contrasena_debil(self):
+        usuario = self.crear_usuario('ana@ejemplo.com')
+        uid = urlsafe_base64_encode(force_bytes(usuario.pk))
+        token = default_token_generator.make_token(usuario)
+        respuesta = self.client.post(
+            '/api/auth/restablecer/',
+            {'uid': uid, 'token': token, 'password': '12345678'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('password', respuesta.data)
 
 
 class AislamientoTests(BaseAPITest):
@@ -511,6 +584,8 @@ class ReprogramarTests(BaseAPITest):
                 Decimal('6.00'),
                 sugerida,
             )
+            # Ninguna sugerencia puede quedar después del inicio del evento.
+            self.assertLessEqual(str(sugerida['fecha']), str(self.evento.fecha_inicio))
 
     def test_reprogramar_no_cuenta_gestiones_hechas_en_la_suma(self):
         """Un día con 5h hechas y 0h abiertas no genera sobrecarga al mover 2h."""
@@ -671,3 +746,261 @@ class ResolverConflictoTests(BaseAPITest):
         )
         self.assertEqual(respuesta.status_code, 401)
 
+
+class HorasPlanificadasTests(BaseAPITest):
+    """El servidor publica las horas planificadas del evento y su estado de agenda."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        self.evento = self.crear_evento(self.ana, nombre='Lanzamiento Q4')
+
+    def test_evento_sin_gestiones_reporta_cero_horas(self):
+        respuesta = self.client.get(f'/api/eventos/{self.evento.id}/')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(float(respuesta.data['horas_planificadas']), 0.0)
+
+    def test_horas_planificadas_suman_las_estimaciones(self):
+        hoy = timezone.localdate()
+        self.crear_tarea(self.evento, hoy + timedelta(days=10), estimacion='2.50')
+        self.crear_tarea(self.evento, hoy + timedelta(days=12), estimacion='1.25')
+        respuesta = self.client.get(f'/api/eventos/{self.evento.id}/')
+        self.assertEqual(float(respuesta.data['horas_planificadas']), 3.75)
+
+    def test_listado_de_eventos_incluye_horas_y_estado_de_agenda(self):
+        respuesta = self.client.get('/api/eventos/')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn('horas_planificadas', respuesta.data[0])
+        self.assertEqual(respuesta.data[0]['estado_agenda'], 'activo')
+
+    def test_estado_agenda_pasado_cuando_todo_esta_hecho(self):
+        ayer = timezone.localdate() - timedelta(days=5)
+        evento = self.crear_evento(self.ana, nombre='Terminado', fecha_inicio=ayer, fecha_final=ayer)
+        self.crear_tarea(evento, ayer, estado='hecho')
+        respuesta = self.client.get(f'/api/eventos/{evento.id}/')
+        self.assertEqual(respuesta.data['estado_agenda'], 'pasado')
+
+    def test_estado_agenda_retrasado_cuando_quedan_gestiones_abiertas(self):
+        ayer = timezone.localdate() - timedelta(days=5)
+        evento = self.crear_evento(self.ana, nombre='Atrasado', fecha_inicio=ayer, fecha_final=ayer)
+        self.crear_tarea(evento, ayer, estado='pendiente')
+        respuesta = self.client.get(f'/api/eventos/{evento.id}/')
+        self.assertEqual(respuesta.data['estado_agenda'], 'retrasado')
+
+    def test_estado_agenda_tiene_prioridad_cuando_esta_cancelado(self):
+        self.client.patch(
+            f'/api/eventos/{self.evento.id}/',
+            {'cancelado': True},
+            format='json',
+        )
+        respuesta = self.client.get(f'/api/eventos/{self.evento.id}/')
+        self.assertTrue(respuesta.data['cancelado'])
+        self.assertEqual(respuesta.data['estado_agenda'], 'cancelado')
+
+
+class EventoCanceladoTests(BaseAPITest):
+    """Un evento cancelado deja de generar trabajo pendiente."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        self.evento = self.crear_evento(self.ana, nombre='Conferencia vieja')
+        self.gestion = self.crear_tarea(self.evento, timezone.localdate(), estimacion='4.00')
+
+    def test_hoy_omite_gestiones_de_eventos_cancelados(self):
+        respuesta = self.client.get('/api/hoy/')
+        self.assertEqual(respuesta.data['total'], 1)
+        self.client.patch(f'/api/eventos/{self.evento.id}/', {'cancelado': True}, format='json')
+        respuesta = self.client.get('/api/hoy/')
+        self.assertEqual(respuesta.data['total'], 0)
+
+    def test_las_gestiones_de_un_evento_cancelado_no_cuentan_en_la_sobrecarga(self):
+        hoy = timezone.localdate()
+        # Segunda gestión del mismo evento: sin la exclusión, 4 h + 4 h superarían el límite de 6 h.
+        otra_gestion = self.crear_tarea(self.evento, hoy, estimacion='4.00', titulo='Segunda')
+        self.client.patch(f'/api/eventos/{self.evento.id}/', {'cancelado': True}, format='json')
+        respuesta = self.client.patch(
+            f'/api/subtareas/{otra_gestion.id}/reprogramar/',
+            {'plazo': hoy.isoformat(), 'hora_limite': '18:00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+
+
+class MotivoMovimientoTests(BaseAPITest):
+    """El motivo del movimiento es opcional y se guarda con la gestión."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        # El evento arranca justo después del día al que se reprograman las
+        # gestiones de prueba (la regla exige plazo ≤ inicio del evento).
+        self.evento = self.crear_evento(
+            self.ana,
+            fecha_inicio=date(2030, 1, 3),
+            fecha_final=date(2030, 1, 3),
+        )
+        self.gestion = self.crear_tarea(self.evento, timezone.localdate() + timedelta(days=10))
+
+    def reprogramar(self, cuerpo):
+        return self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            cuerpo,
+            format='json',
+        )
+
+    def test_mover_sin_motivo_es_valido(self):
+        respuesta = self.reprogramar({'plazo': '2030-01-02', 'hora_limite': '15:00'})
+        self.assertEqual(respuesta.status_code, 200)
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.motivo_movimiento, '')
+
+    def test_motivo_se_guarda_con_la_gestion(self):
+        respuesta = self.reprogramar({
+            'plazo': '2030-01-02',
+            'hora_limite': '15:00',
+            'motivo_movimiento': '  El salón se liberó más tarde.  ',
+        })
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.data['motivo_movimiento'], 'El salón se liberó más tarde.')
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.motivo_movimiento, 'El salón se liberó más tarde.')
+
+    def test_hoy_expone_el_motivo_de_la_gestion(self):
+        self.reprogramar({'plazo': '2030-01-02', 'motivo_movimiento': 'Pendiente del proveedor'})
+        self.gestion.refresh_from_db()
+        # Se deja para hoy con una hora límite todavía por llegar (sin cruzar
+        # la medianoche: a ciertas horas, +3 h cae ya en el día siguiente).
+        ahora = timezone.localtime()
+        limite = ahora + timedelta(hours=3)
+        if limite.date() != ahora.date():
+            limite = ahora.replace(hour=23, minute=59, second=59)
+        self.gestion.plazo = timezone.localdate()
+        self.gestion.hora_limite = limite.time().replace(microsecond=0)
+        self.gestion.save()
+        respuesta = self.client.get('/api/hoy/')
+        motivos = [t['motivo_movimiento'] for t in respuesta.data['grupos']['para_hoy']]
+        self.assertIn('Pendiente del proveedor', motivos)
+
+
+class ValidacionesGestionTests(BaseAPITest):
+    """Reglas de plazo y estimación alineadas con el formulario del frontend."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        self.evento = self.crear_evento(self.ana)  # inicio: hoy + 30 días
+
+    def payload(self, **cambios):
+        datos = {
+            'evento': self.evento.id,
+            'gestion': 'Nueva gestión',
+            'categoria': 'OTRO',
+            'estimacion_horas': '1.00',
+            'plazo': str(self.evento.fecha_inicio),
+            'hora_limite': '09:00',
+        }
+        datos.update(cambios)
+        return datos
+
+    def test_crear_gestion_acepta_plazo_igual_al_inicio(self):
+        respuesta = self.client.post('/api/subtareas/', self.payload(), format='json')
+        self.assertEqual(respuesta.status_code, 201)
+
+    def test_crear_gestion_rechaza_plazo_posterior_al_inicio(self):
+        tarde = self.evento.fecha_inicio + timedelta(days=1)
+        respuesta = self.client.post(
+            '/api/subtareas/', self.payload(plazo=str(tarde)), format='json'
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('plazo', respuesta.data)
+
+    def test_crear_gestion_acepta_estimacion_de_30_minutos(self):
+        respuesta = self.client.post(
+            '/api/subtareas/', self.payload(estimacion_horas='0.50'), format='json'
+        )
+        self.assertEqual(respuesta.status_code, 201)
+
+    def test_crear_gestion_rechaza_estimacion_menor_a_30_minutos(self):
+        respuesta = self.client.post(
+            '/api/subtareas/', self.payload(estimacion_horas='0.25'), format='json'
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('estimacion_horas', respuesta.data)
+
+    def test_reprogramar_rechaza_plazo_posterior_al_inicio(self):
+        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio - timedelta(days=5))
+        tarde = self.evento.fecha_inicio + timedelta(days=2)
+        respuesta = self.client.patch(
+            f'/api/subtareas/{gestion.id}/reprogramar/',
+            {'plazo': str(tarde)},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('plazo', respuesta.data)
+
+    def test_reprogramar_rechaza_estimacion_menor_a_30_minutos(self):
+        dia = self.evento.fecha_inicio - timedelta(days=5)
+        gestion = self.crear_tarea(self.evento, dia)
+        respuesta = self.client.patch(
+            f'/api/subtareas/{gestion.id}/reprogramar/',
+            {'plazo': str(dia), 'estimacion_horas': '0.10'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('estimacion_horas', respuesta.data)
+
+    def test_resolver_conflicto_rechaza_plazo_posterior_al_inicio(self):
+        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio - timedelta(days=5))
+        tarde = self.evento.fecha_inicio + timedelta(days=1)
+        respuesta = self.client.post(
+            f'/api/subtareas/{gestion.id}/resolver-conflicto/',
+            {'estrategia': 'mover_otro_dia', 'plazo': str(tarde)},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('plazo', respuesta.data)
+
+    def test_resolver_conflicto_rechaza_estimacion_menor_a_30_minutos(self):
+        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio - timedelta(days=5))
+        respuesta = self.client.post(
+            f'/api/subtareas/{gestion.id}/resolver-conflicto/',
+            {'estrategia': 'reducir_horas', 'estimacion_horas': '0.20'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('estimacion_horas', respuesta.data)
+
+    def test_crear_gestion_calcula_la_hora_limite_desde_el_comienzo(self):
+        datos = self.payload(estimacion_horas='1.50')
+        datos['hora_inicio'] = '09:00'
+        datos.pop('hora_limite')  # el cliente ya no la envía
+        respuesta = self.client.post('/api/subtareas/', datos, format='json')
+        self.assertEqual(respuesta.status_code, 201)
+        self.assertEqual(respuesta.data['hora_limite'], '10:30:00')
+
+    def test_crear_gestion_exige_hora_de_comienzo_o_hora_limite(self):
+        datos = self.payload()
+        datos.pop('hora_limite')
+        respuesta = self.client.post('/api/subtareas/', datos, format='json')
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('hora_limite', respuesta.data)
+
+    def test_estimacion_no_puede_superar_la_duracion_del_evento(self):
+        """La duración del evento (4.00 h) es el tope de la estimación."""
+        respuesta = self.client.post(
+            '/api/subtareas/', self.payload(estimacion_horas='5.00'), format='json'
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('estimacion_horas', respuesta.data)
+
+    def test_reprogramar_recalcula_la_hora_limite(self):
+        dia = self.evento.fecha_inicio - timedelta(days=5)
+        gestion = self.crear_tarea(self.evento, dia)
+        respuesta = self.client.patch(
+            f'/api/subtareas/{gestion.id}/reprogramar/',
+            {'plazo': str(dia), 'hora_inicio': '08:00', 'estimacion_horas': '2.00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.data['hora_limite'], '10:00:00')

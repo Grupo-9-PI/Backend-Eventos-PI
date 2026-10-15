@@ -1,15 +1,32 @@
+from datetime import time
 from decimal import Decimal
 
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as ErrorDeDjango
+from django.utils import timezone
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
+from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import AuthenticationFailed
 
 from .models import ConfiguracionOrganizador, Evento, Subtarea
 
 Usuario = get_user_model()
+
+
+def sumar_estimacion_a_hora(hora_comienzo, estimacion_horas):
+    """Hora límite = hora de comienzo + estimación (dentro de las 24 h)."""
+    minutos = (
+        hora_comienzo.hour * 60
+        + hora_comienzo.minute
+        + int(round(float(estimacion_horas) * 60))
+    )
+    minutos %= 24 * 60
+    return time(hour=minutos // 60, minute=minutos % 60)
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +98,49 @@ class RespuestaAuthSerializer(serializers.Serializer):
     usuario = UsuarioSerializer()
 
 
+class RecuperarPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField(
+        help_text="Correo de la cuenta que quieres recuperar."
+    )
+
+
+class RestablecerPasswordSerializer(serializers.Serializer):
+    uid = serializers.CharField(
+        help_text="Identificador de la cuenta incluido en el enlace del correo."
+    )
+    token = serializers.CharField(
+        help_text="Token de un solo uso incluido en el enlace del correo."
+    )
+    password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_password(self, value):
+        try:
+            validate_password(value)
+        except ErrorDeDjango as error:
+            raise serializers.ValidationError(list(error.messages))
+        return value
+
+    def validate(self, attrs):
+        mensaje = 'El enlace de recuperación no es válido o ya venció.'
+        try:
+            uid = urlsafe_base64_decode(attrs['uid']).decode()
+            usuario = Usuario.objects.get(pk=uid)
+        except (TypeError, ValueError, OverflowError, Usuario.DoesNotExist):
+            raise serializers.ValidationError({'token': mensaje})
+        if not default_token_generator.check_token(usuario, attrs['token']):
+            raise serializers.ValidationError({'token': mensaje})
+        attrs['usuario'] = usuario
+        return attrs
+
+    def save(self):
+        usuario = self.validated_data['usuario']
+        usuario.set_password(self.validated_data['password'])
+        usuario.save(update_fields=['password'])
+        # Las sesiones abiertas antes del cambio dejan de servir.
+        Token.objects.filter(user=usuario).delete()
+        return usuario
+
+
 # ---------------------------------------------------------------------------
 # Eventos y gestiones
 # ---------------------------------------------------------------------------
@@ -89,6 +149,9 @@ class SubtareaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Subtarea
         fields = '__all__'
+        # La hora límite la calcula el servidor (comienzo + estimación); solo
+        # se acepta del cliente cuando la gestión no tiene hora de comienzo.
+        extra_kwargs = {'hora_limite': {'required': False}}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -99,22 +162,72 @@ class SubtareaSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         estimacion = data.get('estimacion_horas', getattr(self.instance, 'estimacion_horas', None))
-        if estimacion is not None and estimacion <= 0:
-            raise serializers.ValidationError({"estimacion_horas": "La estimación debe ser mayor a 0 horas."})
+        if estimacion is not None and estimacion < Decimal('0.50'):
+            raise serializers.ValidationError(
+                {"estimacion_horas": "La estimación debe ser de al menos 30 minutos."}
+            )
 
-        # El plazo organiza trabajo logístico: puede estar antes o después de las fechas del evento.
+        # El plazo organiza trabajo logístico: nunca después del inicio del
+        # evento (la misma regla que aplica el formulario del frontend).
+        evento = data.get('evento', getattr(self.instance, 'evento', None))
+        plazo = data.get('plazo', getattr(self.instance, 'plazo', None))
+        if evento is not None and plazo is not None and plazo > evento.fecha_inicio:
+            raise serializers.ValidationError({
+                "plazo": "El plazo de la gestión debe ser anterior o igual al inicio del evento."
+            })
+
+        # La estimación depende de la duración total del evento; se tolera el
+        # valor ya guardado para no bloquear la edición de gestiones antiguas.
+        estimacion_actual = getattr(self.instance, 'estimacion_horas', None)
+        if (
+            estimacion is not None
+            and evento is not None
+            and estimacion > evento.duracion_horas
+            and estimacion != estimacion_actual
+        ):
+            raise serializers.ValidationError({
+                "estimacion_horas": (
+                    "La estimación no puede superar la duración total del evento "
+                    f"({evento.duracion_horas} h)."
+                )
+            })
+
+        # La hora límite no la escribe el cliente: es el comienzo + la estimación.
+        hora_inicio = data.get('hora_inicio', getattr(self.instance, 'hora_inicio', None))
+        if hora_inicio is not None and estimacion is not None:
+            data['hora_limite'] = sumar_estimacion_a_hora(hora_inicio, estimacion)
+        elif data.get('hora_limite') is None and not getattr(self.instance, 'hora_limite', None):
+            raise serializers.ValidationError({
+                "hora_limite": "Indica la hora de comienzo de la gestión."
+            })
+
         return data
 
 
 class EventoSerializer(serializers.ModelSerializer):
     subtareas = SubtareaSerializer(many=True, read_only=True)
+    # Solo lectura: los calcula el servidor para que el frontend no duplique la suma.
     horas_planificadas = serializers.SerializerMethodField()
+    estado_agenda = serializers.SerializerMethodField()
 
     class Meta:
         model = Evento
         fields = '__all__'
         # El dueño se asigna siempre desde la sesión, nunca desde el cliente.
-        read_only_fields = ['propietario', 'creado_en']
+        read_only_fields = ['propietario', 'creado_en', 'horas_planificadas', 'estado_agenda']
+
+    @extend_schema_field(serializers.CharField())
+    def get_estado_agenda(self, obj):
+        """Clasificación para los filtros de /eventos: activo | pasado | retrasado | cancelado."""
+        if obj.cancelado:
+            return 'cancelado'
+        if obj.fecha_inicio >= timezone.localdate():
+            return 'activo'
+        if not obj.subtareas.exists():
+            return 'pasado'
+        if obj.subtareas.exclude(estado='hecho').exists():
+            return 'retrasado'
+        return 'pasado'
 
     @extend_schema_field(serializers.CharField())
     def get_horas_planificadas(self, obj):
@@ -172,6 +285,7 @@ class TareaHoySerializer(serializers.ModelSerializer):
             'hora_limite',
             'hora_inicio',
             'estimacion_horas',
+            'motivo_movimiento',
             'evento',
         ]
 
@@ -219,21 +333,37 @@ class ReprogramarTareaSerializer(serializers.Serializer):
     plazo = serializers.DateField(
         help_text="Nueva fecha límite (plazo) para la gestión (YYYY-MM-DD)."
     )
+    hora_inicio = serializers.TimeField(
+        required=False,
+        allow_null=True,
+        help_text="Hora de comienzo de la gestión; con ella el servidor recalcula la hora límite.",
+    )
     hora_limite = serializers.TimeField(
         required=False,
-        help_text="Nueva hora límite (opcional)."
+        help_text="Hora límite (solo se usa si la gestión no tiene hora de comienzo)."
     )
     estimacion_horas = serializers.DecimalField(
         max_digits=5,
         decimal_places=2,
         required=False,
-        help_text="Nueva estimación de horas (opcional, debe ser > 0)."
+        help_text="Nueva estimación de horas (opcional, mínimo 30 minutos).",
+    )
+    motivo_movimiento = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500,
+        help_text="Motivo opcional del cambio (se guarda con la gestión).",
     )
 
     def validate_estimacion_horas(self, value):
-        if value is not None and value <= 0:
-            raise serializers.ValidationError("La estimación debe ser mayor a 0 horas.")
+        if value is not None and value < Decimal('0.50'):
+            raise serializers.ValidationError(
+                "La estimación debe ser de al menos 30 minutos."
+            )
         return value
+
+    def validate_motivo_movimiento(self, value):
+        return value.strip()
 
 
 class ResolverConflictoSerializer(serializers.Serializer):
@@ -260,8 +390,10 @@ class ResolverConflictoSerializer(serializers.Serializer):
     )
 
     def validate_estimacion_horas(self, value):
-        if value is not None and value <= 0:
-            raise serializers.ValidationError("La estimación debe ser mayor a 0 horas.")
+        if value is not None and value < Decimal('0.50'):
+            raise serializers.ValidationError(
+                "La estimación debe ser de al menos 30 minutos."
+            )
         return value
 
 

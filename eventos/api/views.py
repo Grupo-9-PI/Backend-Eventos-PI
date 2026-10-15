@@ -1,9 +1,15 @@
+import os
 from decimal import Decimal
 from datetime import timedelta
 
+from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
+from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, extend_schema
 from rest_framework import status, viewsets
@@ -20,15 +26,20 @@ from .serializers import (
     ErrorConflictoSerializer,
     EventoSerializer,
     LoginSerializer,
+    RecuperarPasswordSerializer,
     RegistroSerializer,
     ReprogramarTareaSerializer,
     ResolverConflictoRespuestaSerializer,
     ResolverConflictoSerializer,
     RespuestaAuthSerializer,
     RespuestaHoySerializer,
+    RestablecerPasswordSerializer,
     SubtareaSerializer,
     UsuarioSerializer,
+    sumar_estimacion_a_hora,
 )
+
+Usuario = get_user_model()
 
 EJEMPLO_RESPUESTA_CONFLICTO = {
     "conflicto": True,
@@ -226,6 +237,109 @@ class MeView(APIView):
         return Response(UsuarioSerializer(request.user).data)
 
 
+def _enviar_correo_recuperacion(usuario):
+    """
+    Envía el enlace de restablecimiento con uid + token de un solo uso.
+
+    Con el backend de correo por consola (desarrollo) el enlace se imprime en
+    la consola del servidor; en despliegue se configura SMTP por variables de
+    entorno (EMAIL_HOST, EMAIL_HOST_USER, ...).
+    """
+    uid = urlsafe_base64_encode(force_bytes(usuario.pk))
+    token = default_token_generator.make_token(usuario)
+    base = (
+        os.environ.get('FRONTEND_URL') or 'http://localhost:5173'
+    ).split(',')[0].strip()
+    enlace = f'{base}/restablecer?uid={uid}&token={token}'
+    send_mail(
+        subject='EventOps · Restablece tu contraseña',
+        message=(
+            f'Hola {usuario.first_name or usuario.username}:\n\n'
+            'Recibimos una solicitud para restablecer tu contraseña en EventOps.\n'
+            f'Abre este enlace para elegir una nueva: {enlace}\n\n'
+            'El enlace vence pronto. Si no fuiste tú, ignora este correo; '
+            'tu contraseña actual seguirá funcionando.\n'
+        ),
+        from_email=None,  # Usa DEFAULT_FROM_EMAIL.
+        recipient_list=[usuario.email],
+        fail_silently=True,
+    )
+
+
+class RecuperarPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        tags=['auth'],
+        summary='Solicitar el restablecimiento de contraseña',
+        description=(
+            'Si el correo pertenece a una cuenta, envía un enlace de restablecimiento '
+            '(en desarrollo el enlace se imprime en la consola del servidor). La respuesta '
+            'es siempre la misma para no revelar si el correo está registrado.'
+        ),
+        request=RecuperarPasswordSerializer,
+        responses={200: OpenApiTypes.OBJECT},
+        examples=[
+            OpenApiExample(
+                'Solicitud de recuperación',
+                value={"email": "ana@ejemplo.com"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Respuesta genérica',
+                value={
+                    "detail": "Si el correo está registrado, te enviamos un enlace para restablecer tu contraseña."
+                },
+                response_only=True,
+            ),
+        ],
+    )
+    def post(self, request):
+        ser = RecuperarPasswordSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        email = ser.validated_data['email'].strip().lower()
+        usuario = Usuario.objects.filter(username__iexact=email).first()
+        if usuario is not None:
+            _enviar_correo_recuperacion(usuario)
+        return Response({
+            'detail': 'Si el correo está registrado, te enviamos un enlace para restablecer tu contraseña.'
+        })
+
+
+class RestablecerPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        tags=['auth'],
+        summary='Restablecer la contraseña con el enlace del correo',
+        description=(
+            'Valida el `uid` y el `token` del enlace enviado por correo, guarda la nueva '
+            'contraseña y cierra las sesiones abiertas de la cuenta.'
+        ),
+        request=RestablecerPasswordSerializer,
+        responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT},
+        examples=[
+            OpenApiExample(
+                'Solicitud de restablecimiento',
+                value={"uid": "MQ", "token": "c8g1ab-9f2b1c4d8e7f6a5b4c3d2e1f", "password": "NuevaClave123"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Respuesta',
+                value={"detail": "Contraseña actualizada. Ya puedes iniciar sesión con la nueva."},
+                response_only=True,
+            ),
+        ],
+    )
+    def post(self, request):
+        ser = RestablecerPasswordSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response({
+            'detail': 'Contraseña actualizada. Ya puedes iniciar sesión con la nueva.'
+        })
+
+
 # ---------------------------------------------------------------------------
 # Configuración del organizador (Límite diario de horas)
 # ---------------------------------------------------------------------------
@@ -325,7 +439,9 @@ class HoyView(APIView):
             'comparten fecha, va primero la de menor esfuerzo estimado; ante un empate total se usa '
             'la hora límite.\n\n'
             '**Filtros:** `evento` limita a un evento propio y `estado` acepta `abiertas` (por '
-            'defecto: pendientes y en progreso), `pendiente`, `en_progreso`, `hecho` o `todas`.'
+            'defecto: pendientes y en progreso), `pendiente`, `en_progreso`, `hecho` o `todas`.\n\n'
+            '**Eventos cancelados:** sus gestiones no aparecen en esta vista, porque un evento '
+            'cancelado deja de generar trabajo pendiente.'
         ),
         parameters=[
             OpenApiParameter(
@@ -362,7 +478,11 @@ class HoyView(APIView):
     def get(self, request):
         hoy = timezone.localdate()
         ahora = timezone.localtime().time().replace(tzinfo=None)
-        tareas = Subtarea.objects.filter(evento__propietario=request.user).select_related('evento')
+        # Un evento cancelado no genera trabajo pendiente: sus gestiones salen de Hoy.
+        tareas = Subtarea.objects.filter(
+            evento__propietario=request.user,
+            evento__cancelado=False,
+        ).select_related('evento')
 
         evento_id = request.query_params.get('evento')
         evento_filtrado = None
@@ -436,6 +556,7 @@ def _cifras_dia(usuario, fecha, estimacion_nueva, excluir_subtarea_id=None):
     limite = _obtener_limite_organizador(usuario)
     qs = Subtarea.objects.filter(
         evento__propietario=usuario,
+        evento__cancelado=False,
         plazo=fecha,
     ).exclude(estado='hecho')
     if excluir_subtarea_id is not None:
@@ -466,16 +587,19 @@ def _calcular_sobrecarga(usuario, fecha_nueva, estimacion_nueva, excluir_subtare
 
 
 def _sugerir_fechas(usuario, fecha_base, estimacion_nueva, excluir_subtarea_id=None,
-                    horizonte_dias=90, maximo=3):
+                    horizonte_dias=90, maximo=3, fecha_tope=None):
     """
     Sugiere días próximos en los que la gestión cabe sin superar el límite diario.
 
-    Recorre desde el día siguiente a `fecha_base` hasta `horizonte_dias` y devuelve
-    hasta `maximo` fechas con su carga total proyectada.
+    Recorre desde el día siguiente a `fecha_base` hasta `horizonte_dias` (o hasta
+    `fecha_tope`, la fecha máxima válida —el inicio del evento—) y devuelve hasta
+    `maximo` fechas con su carga total proyectada.
     """
     sugeridas = []
     for dias in range(1, horizonte_dias + 1):
         fecha = fecha_base + timedelta(days=dias)
+        if fecha_tope is not None and fecha > fecha_tope:
+            break
         cifras = _cifras_dia(usuario, fecha, estimacion_nueva, excluir_subtarea_id)
         if cifras['horas_exceso'] <= 0:
             sugeridas.append({
@@ -549,7 +673,12 @@ class SubtareaViewSet(viewsets.ModelViewSet):
         tags=['subtareas'],
         summary='Reprogramar una gestión (con detección de sobrecarga)',
         description=(
-            'Cambia el plazo, hora límite y/o estimación de horas de una gestión.\n\n'
+            'Cambia el plazo, la hora límite, el comienzo y/o la estimación de horas de una\n'
+            'gestión, y opcionalmente el **motivo** del cambio (`motivo_movimiento`, opcional).\n\n'
+            'El **plazo** no puede ser posterior al inicio del evento y la **estimación** no puede\n'
+            'superar la duración total del evento: son las mismas reglas que valida el formulario.\n\n'
+            'La **hora límite** no la escribe el cliente: el servidor la calcula como comienzo +\n'
+            'estimación (`hora_inicio + estimacion_horas`).\n\n'
             '**Lógica de sobrecarga:** si la nueva fecha ya acumula más horas que el límite '
             'diario del organizador (configurable en `/api/config/`), el servidor **aborta la '
             'transacción** y devuelve `409 Conflict` con las cifras exactas del exceso para que '
@@ -573,6 +702,11 @@ class SubtareaViewSet(viewsets.ModelViewSet):
             OpenApiExample(
                 'Reprogramar también con nueva estimación',
                 value={"plazo": "2026-10-20", "hora_limite": "15:00", "estimacion_horas": "2.50"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Reprogramar con motivo del cambio',
+                value={"plazo": "2026-10-20", "hora_limite": "15:00", "motivo_movimiento": "El salón se liberó más tarde."},
                 request_only=True,
             ),
             OpenApiExample(
@@ -610,6 +744,26 @@ class SubtareaViewSet(viewsets.ModelViewSet):
         fecha_nueva = datos.get('plazo', subtarea.plazo)
         estimacion_nueva = datos.get('estimacion_horas', subtarea.estimacion_horas)
 
+        # Misma regla que el formulario: el plazo nunca pasa del inicio del evento.
+        if fecha_nueva > subtarea.evento.fecha_inicio:
+            return Response(
+                {'plazo': 'El plazo de la gestión debe ser anterior o igual al inicio del evento.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # La estimación no puede superar la duración total del evento.
+        if (
+            'estimacion_horas' in datos
+            and estimacion_nueva > subtarea.evento.duracion_horas
+        ):
+            return Response(
+                {'estimacion_horas': (
+                    'La estimación no puede superar la duración total del evento '
+                    f'({subtarea.evento.duracion_horas} h).'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # Verificar sobrecarga: excluimos la subtarea actual para no contarla dos veces
         conflicto = _calcular_sobrecarga(
             usuario=request.user,
@@ -637,6 +791,7 @@ class SubtareaViewSet(viewsets.ModelViewSet):
                     fecha_base=fecha_nueva,
                     estimacion_nueva=estimacion_nueva,
                     excluir_subtarea_id=subtarea.pk,
+                    fecha_tope=subtarea.evento.fecha_inicio,
                 ),
             }
             return Response(cuerpo, status=status.HTTP_409_CONFLICT)
@@ -645,10 +800,19 @@ class SubtareaViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             if 'plazo' in datos:
                 subtarea.plazo = datos['plazo']
-            if 'hora_limite' in datos:
+            if 'hora_inicio' in datos:
+                subtarea.hora_inicio = datos['hora_inicio']
+            if 'hora_limite' in datos and subtarea.hora_inicio is None:
                 subtarea.hora_limite = datos['hora_limite']
             if 'estimacion_horas' in datos:
                 subtarea.estimacion_horas = datos['estimacion_horas']
+            if 'motivo_movimiento' in datos:
+                subtarea.motivo_movimiento = datos['motivo_movimiento']
+            # La hora límite la calcula el servidor: comienzo + estimación.
+            if subtarea.hora_inicio is not None:
+                subtarea.hora_limite = sumar_estimacion_a_hora(
+                    subtarea.hora_inicio, subtarea.estimacion_horas
+                )
             subtarea.save()
 
         return Response(SubtareaSerializer(subtarea, context={'request': request}).data)
@@ -666,7 +830,8 @@ class ResolverConflictoView(APIView):
             'Aplica la estrategia elegida por el organizador para resolver el conflicto de '
             'sobrecarga detectado al reprogramar, y **recalcula** el día para confirmar el resultado.\n\n'
             '**Estrategias disponibles:**\n'
-            '- `mover_otro_dia`: mueve la gestión al `plazo` indicado.\n'
+            '- `mover_otro_dia`: mueve la gestión al `plazo` indicado, que no puede ser '
+            'posterior al inicio del evento.\n'
             '- `reducir_horas`: cambia la `estimacion_horas` de la gestión al valor indicado; '
             'mantiene el plazo original.\n\n'
             'Si el conflicto persiste tras aplicar el cambio, la respuesta lo indica con '
@@ -720,8 +885,13 @@ class ResolverConflictoView(APIView):
                         {'plazo': "Se requiere 'plazo' para la estrategia 'mover_otro_dia'."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                if datos['plazo'] > subtarea.evento.fecha_inicio:
+                    return Response(
+                        {'plazo': 'El plazo de la gestión debe ser anterior o igual al inicio del evento.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 subtarea.plazo = datos['plazo']
-                if 'hora_limite' in datos:
+                if 'hora_limite' in datos and subtarea.hora_inicio is None:
                     subtarea.hora_limite = datos['hora_limite']
 
             elif estrategia == 'reducir_horas':
@@ -730,7 +900,21 @@ class ResolverConflictoView(APIView):
                         {'estimacion_horas': "Se requiere 'estimacion_horas' para la estrategia 'reducir_horas'."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                if datos['estimacion_horas'] > subtarea.evento.duracion_horas:
+                    return Response(
+                        {'estimacion_horas': (
+                            'La estimación no puede superar la duración total del evento '
+                            f'({subtarea.evento.duracion_horas} h).'
+                        )},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 subtarea.estimacion_horas = datos['estimacion_horas']
+
+            # La hora límite la calcula el servidor: comienzo + estimación.
+            if subtarea.hora_inicio is not None:
+                subtarea.hora_limite = sumar_estimacion_a_hora(
+                    subtarea.hora_inicio, subtarea.estimacion_horas
+                )
 
             subtarea.save()
 
@@ -770,5 +954,6 @@ class ResolverConflictoView(APIView):
                 fecha_base=subtarea.plazo,
                 estimacion_nueva=subtarea.estimacion_horas,
                 excluir_subtarea_id=subtarea.pk,
+                fecha_tope=subtarea.evento.fecha_inicio,
             )
         return Response(cuerpo)
