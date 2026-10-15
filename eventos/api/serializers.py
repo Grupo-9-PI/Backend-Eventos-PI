@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as ErrorDeDjango
@@ -101,20 +103,14 @@ class SubtareaSerializer(serializers.ModelSerializer):
         if estimacion is not None and estimacion <= 0:
             raise serializers.ValidationError({"estimacion_horas": "La estimación debe ser mayor a 0 horas."})
 
-        evento = data.get('evento', getattr(self.instance, 'evento', None))
-        plazo = data.get('plazo', getattr(self.instance, 'plazo', None))
-        if evento is not None and plazo is not None and plazo > evento.fecha_inicio:
-            raise serializers.ValidationError({"plazo": "El plazo de la gestión debe ser anterior o igual al inicio del evento."})
-
+        # El plazo organiza trabajo logístico: puede estar antes o después de las fechas del evento.
         return data
 
 
 class EventoSerializer(serializers.ModelSerializer):
     subtareas = SubtareaSerializer(many=True, read_only=True)
-    # Solo lectura: lo calcula el servidor para que el frontend no duplique la suma.
-    horas_planificadas = serializers.DecimalField(
-        max_digits=5, decimal_places=2, read_only=True
-    )
+    # Solo lectura: los calcula el servidor para que el frontend no duplique la suma.
+    horas_planificadas = serializers.SerializerMethodField()
     estado_agenda = serializers.SerializerMethodField()
 
     class Meta:
@@ -135,6 +131,12 @@ class EventoSerializer(serializers.ModelSerializer):
         if obj.subtareas.exclude(estado='hecho').exists():
             return 'retrasado'
         return 'pasado'
+
+    @extend_schema_field(serializers.CharField())
+    def get_horas_planificadas(self, obj):
+        """Horas de trabajo que usa el evento, calculadas a partir de sus gestiones."""
+        total = sum((t.estimacion_horas for t in obj.subtareas.all()), Decimal('0'))
+        return str(total)
 
     def validate(self, data):
         inicio = data.get('fecha_inicio', getattr(self.instance, 'fecha_inicio', None))
@@ -219,10 +221,10 @@ class ConfiguracionOrganizadorSerializer(serializers.ModelSerializer):
         fields = ['limite_diario_horas']
 
     def validate_limite_diario_horas(self, value):
-        if value <= 0:
-            raise serializers.ValidationError("El límite diario debe ser mayor a 0 horas.")
-        if value > 24:
-            raise serializers.ValidationError("El límite diario no puede superar las 24 horas.")
+        if value < 1 or value > 16:
+            raise serializers.ValidationError(
+                "El límite diario debe estar entre 1 y 16 horas."
+            )
         return value
 
 
@@ -298,6 +300,11 @@ class DetalleConflictoSerializer(serializers.Serializer):
     horas_exceso = serializers.DecimalField(max_digits=5, decimal_places=2)
 
 
+class FechaSugeridaSerializer(serializers.Serializer):
+    fecha = serializers.DateField()
+    horas_totales_proyectadas = serializers.DecimalField(max_digits=5, decimal_places=2)
+
+
 class ErrorConflictoSerializer(serializers.Serializer):
     conflicto = serializers.BooleanField(default=True)
     codigo = serializers.CharField(default="SOBRECARGA_DIARIA")
@@ -309,5 +316,16 @@ class ErrorConflictoSerializer(serializers.Serializer):
     horas_totales_proyectadas = serializers.DecimalField(max_digits=5, decimal_places=2)
     horas_exceso = serializers.DecimalField(max_digits=5, decimal_places=2)
     estrategias_disponibles = serializers.ListField(child=serializers.CharField())
+    fechas_sugeridas = FechaSugeridaSerializer(many=True)
     detalles = DetalleConflictoSerializer(required=False)
+
+
+class ResolverConflictoRespuestaSerializer(serializers.Serializer):
+    resuelto = serializers.BooleanField()
+    mensaje = serializers.CharField()
+    subtarea = SubtareaSerializer()
+    limite_horas = serializers.DecimalField(max_digits=4, decimal_places=2)
+    horas_totales_proyectadas = serializers.DecimalField(max_digits=5, decimal_places=2)
+    horas_exceso = serializers.DecimalField(max_digits=5, decimal_places=2)
+    fechas_sugeridas = FechaSugeridaSerializer(many=True)
 
