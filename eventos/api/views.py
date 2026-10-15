@@ -295,7 +295,9 @@ class HoyView(APIView):
             'comparten fecha, va primero la de menor esfuerzo estimado; ante un empate total se usa '
             'la hora límite.\n\n'
             '**Filtros:** `evento` limita a un evento propio y `estado` acepta `abiertas` (por '
-            'defecto: pendientes y en progreso), `pendiente`, `en_progreso`, `hecho` o `todas`.'
+            'defecto: pendientes y en progreso), `pendiente`, `en_progreso`, `hecho` o `todas`.\n\n'
+            '**Eventos cancelados:** sus gestiones no aparecen en esta vista, porque un evento '
+            'cancelado deja de generar trabajo pendiente.'
         ),
         parameters=[
             OpenApiParameter(
@@ -332,7 +334,11 @@ class HoyView(APIView):
     def get(self, request):
         hoy = timezone.localdate()
         ahora = timezone.localtime().time().replace(tzinfo=None)
-        tareas = Subtarea.objects.filter(evento__propietario=request.user).select_related('evento')
+        # Un evento cancelado no genera trabajo pendiente: sus gestiones salen de Hoy.
+        tareas = Subtarea.objects.filter(
+            evento__propietario=request.user,
+            evento__cancelado=False,
+        ).select_related('evento')
 
         evento_id = request.query_params.get('evento')
         evento_filtrado = None
@@ -406,6 +412,7 @@ def _calcular_sobrecarga(usuario, fecha_nueva, estimacion_nueva, excluir_subtare
     limite = _obtener_limite_organizador(usuario)
     qs = Subtarea.objects.filter(
         evento__propietario=usuario,
+        evento__cancelado=False,
         plazo=fecha_nueva,
     )
     if excluir_subtarea_id is not None:
@@ -490,7 +497,8 @@ class SubtareaViewSet(viewsets.ModelViewSet):
         tags=['subtareas'],
         summary='Reprogramar una gestión (con detección de sobrecarga)',
         description=(
-            'Cambia el plazo, hora límite y/o estimación de horas de una gestión.\n\n'
+            'Cambia el plazo, hora límite y/o estimación de horas de una gestión, y opcionalmente\n'
+            'el **motivo** del cambio (`motivo_movimiento`, opcional).\n\n'
             '**Lógica de sobrecarga:** si la nueva fecha ya acumula más horas que el límite '
             'diario del organizador (configurable en `/api/config/`), el servidor **aborta la '
             'transacción** y devuelve `409 Conflict` con las cifras exactas del exceso para que '
@@ -512,6 +520,11 @@ class SubtareaViewSet(viewsets.ModelViewSet):
             OpenApiExample(
                 'Reprogramar también con nueva estimación',
                 value={"plazo": "2026-10-20", "hora_limite": "15:00", "estimacion_horas": "2.50"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Reprogramar con motivo del cambio',
+                value={"plazo": "2026-10-20", "hora_limite": "15:00", "motivo_movimiento": "El salón se liberó más tarde."},
                 request_only=True,
             ),
             OpenApiExample(
@@ -582,6 +595,8 @@ class SubtareaViewSet(viewsets.ModelViewSet):
                 subtarea.hora_limite = datos['hora_limite']
             if 'estimacion_horas' in datos:
                 subtarea.estimacion_horas = datos['estimacion_horas']
+            if 'motivo_movimiento' in datos:
+                subtarea.motivo_movimiento = datos['motivo_movimiento']
             subtarea.save()
 
         return Response(SubtareaSerializer(subtarea, context={'request': request}).data)

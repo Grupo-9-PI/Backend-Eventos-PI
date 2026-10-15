@@ -1,6 +1,7 @@
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as ErrorDeDjango
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
@@ -110,12 +111,30 @@ class SubtareaSerializer(serializers.ModelSerializer):
 
 class EventoSerializer(serializers.ModelSerializer):
     subtareas = SubtareaSerializer(many=True, read_only=True)
+    # Solo lectura: lo calcula el servidor para que el frontend no duplique la suma.
+    horas_planificadas = serializers.DecimalField(
+        max_digits=5, decimal_places=2, read_only=True
+    )
+    estado_agenda = serializers.SerializerMethodField()
 
     class Meta:
         model = Evento
         fields = '__all__'
         # El dueño se asigna siempre desde la sesión, nunca desde el cliente.
-        read_only_fields = ['propietario', 'creado_en']
+        read_only_fields = ['propietario', 'creado_en', 'horas_planificadas', 'estado_agenda']
+
+    @extend_schema_field(serializers.CharField())
+    def get_estado_agenda(self, obj):
+        """Clasificación para los filtros de /eventos: activo | pasado | retrasado | cancelado."""
+        if obj.cancelado:
+            return 'cancelado'
+        if obj.fecha_inicio >= timezone.localdate():
+            return 'activo'
+        if not obj.subtareas.exists():
+            return 'pasado'
+        if obj.subtareas.exclude(estado='hecho').exists():
+            return 'retrasado'
+        return 'pasado'
 
     def validate(self, data):
         inicio = data.get('fecha_inicio', getattr(self.instance, 'fecha_inicio', None))
@@ -167,6 +186,7 @@ class TareaHoySerializer(serializers.ModelSerializer):
             'hora_limite',
             'hora_inicio',
             'estimacion_horas',
+            'motivo_movimiento',
             'evento',
         ]
 
@@ -222,13 +242,22 @@ class ReprogramarTareaSerializer(serializers.Serializer):
         max_digits=5,
         decimal_places=2,
         required=False,
-        help_text="Nueva estimación de horas (opcional, debe ser > 0)."
+        help_text="Nueva estimación de horas (opcional, debe ser > 0).",
+    )
+    motivo_movimiento = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500,
+        help_text="Motivo opcional del cambio (se guarda con la gestión).",
     )
 
     def validate_estimacion_horas(self, value):
         if value is not None and value <= 0:
             raise serializers.ValidationError("La estimación debe ser mayor a 0 horas.")
         return value
+
+    def validate_motivo_movimiento(self, value):
+        return value.strip()
 
 
 class ResolverConflictoSerializer(serializers.Serializer):

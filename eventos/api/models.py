@@ -1,5 +1,8 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.db import models
+from django.db.models import Sum
 
 
 class Evento(models.Model):
@@ -19,10 +22,18 @@ class Evento(models.Model):
     duracion_horas = models.DecimalField(max_digits=6, decimal_places=2, verbose_name="Duración del evento (horas)")
     limite_diario_horas = models.DecimalField(max_digits=4, decimal_places=2, verbose_name="Límite diario de trabajo (horas)")
     notas_produccion = models.TextField(blank=True, null=True, verbose_name="Notas de producción")
+    # Un evento cancelado deja de generar trabajo: sus|fecha límites ya no aplican.
+    cancelado = models.BooleanField(default=False, verbose_name="Cancelado")
     creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Creado en")
 
     def __str__(self):
         return self.nombre
+
+    @property
+    def horas_planificadas(self):
+        """Suma de las estimaciones de sus gestiones (la calcula el servidor)."""
+        total = self.subtareas.aggregate(total=Sum('estimacion_horas'))['total']
+        return total or Decimal('0.00')
 
 
 class Subtarea(models.Model):
@@ -59,6 +70,9 @@ class Subtarea(models.Model):
     plazo = models.DateField(verbose_name="Plazo (fecha)")
     hora_limite = models.TimeField(verbose_name="Hora límite")
     hora_inicio = models.TimeField(null=True, blank=True, verbose_name="Hora inicio programado")
+
+    # Motivo opcional del último cambio de fecha/hora u horas de la gestión.
+    motivo_movimiento = models.TextField(blank=True, default="", verbose_name="Motivo del movimiento")
 
     def __str__(self):
         return f"{self.gestion} - {self.evento.nombre}"

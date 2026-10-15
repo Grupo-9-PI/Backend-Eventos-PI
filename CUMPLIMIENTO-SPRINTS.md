@@ -236,6 +236,7 @@ $env:DATABASE_URL="sqlite:///db-pruebas.sqlite3"
 
 ### C6 — Bitácora de archivos intervenidos
 
+### SPRINT 3
 Detalle de cada uno de los archivos modificados en el repositorio:
 
 1. **`eventos/api/models.py`**:
@@ -317,3 +318,33 @@ Detalle de cada uno de los archivos modificados en el repositorio:
   `FRONTEND_URL`/`CORS_ALLOWED_ORIGINS`.
 
 
+
+---
+
+## Cierre de restricciones de interfaz (sprint 5)
+
+El frontend pasó a reflejar en pantalla reglas que el servidor ya aplicaba, y dejó de enviar
+datos que este descartaba. Cambios en `eventos/api`:
+
+### Nuevos campos
+
+| Campo | Modelo | Para qué sirve |
+| --- | --- | --- |
+| `Evento.horas_planificadas` | `ReadOnlyField` de `EventoSerializer` | Suma de `estimacion_horas` de sus gestiones. El frontend ya lo leía (`horas_planificadas`) pero el servidor nunca lo enviaba, así que el detalle de cada evento mostraba siempre «0 h de trabajo planificado». |
+| `Evento.estado_agenda` | `SerializerMethodField` de `EventoSerializer` | Clasificación calculada por el servidor: `cancelado`, `activo`, `retrasado` (fecha de inicio pasada con gestiones abiertas) o `pasado` (todo hecho). Alimenta los filtros de `/eventos`. |
+| `Evento.cancelado` | `BooleanField(default=False)` | Estado del evento. **Migración `0008_cancelado_y_motivo_movimiento.py`.** |
+| `Subtarea.motivo_movimiento` | `TextField(blank=True)` | Motivo opcional del movimiento de una gestión. **Misma migración.** |
+
+### Reglas de negocio aplicadas
+
+- Un **evento cancelado deja de generar trabajo pendiente**: sus gestiones no aparecen en
+  `GET /api/hoy/` ni cuentan en el cálculo de sobrecarga diaria de `_calcular_sobrecarga`.
+- `motivo_movimiento` se persiste en `PATCH /api/subtareas/<id>/reprogramar/` (opcional, se
+  recorta con espacios) y se expone en `TareaHoySerializer`, de modo que `/hoy/` lo devuelve.
+
+### Verificación
+
+| Comprobación | Resultado |
+| --- | --- |
+| `python manage.py test` | **54 pruebas, OK** (43 anteriores + 11 nuevas: `HorasPlanificadasTests` 6, `EventoCanceladoTests` 2, `MotivoMovimientoTests` 3). |
+| `manage.py makemigrations` | Genera solo la migración `0008`; el modelo y las migraciones están sincronizados. |

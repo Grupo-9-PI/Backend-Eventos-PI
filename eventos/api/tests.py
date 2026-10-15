@@ -549,3 +549,127 @@ class ResolverConflictoTests(BaseAPITest):
         )
         self.assertEqual(respuesta.status_code, 401)
 
+
+class HorasPlanificadasTests(BaseAPITest):
+    """El servidor publica las horas planificadas del evento y su estado de agenda."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        self.evento = self.crear_evento(self.ana, nombre='Lanzamiento Q4')
+
+    def test_evento_sin_gestiones_reporta_cero_horas(self):
+        respuesta = self.client.get(f'/api/eventos/{self.evento.id}/')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(float(respuesta.data['horas_planificadas']), 0.0)
+
+    def test_horas_planificadas_suman_las_estimaciones(self):
+        hoy = timezone.localdate()
+        self.crear_tarea(self.evento, hoy + timedelta(days=10), estimacion='2.50')
+        self.crear_tarea(self.evento, hoy + timedelta(days=12), estimacion='1.25')
+        respuesta = self.client.get(f'/api/eventos/{self.evento.id}/')
+        self.assertEqual(float(respuesta.data['horas_planificadas']), 3.75)
+
+    def test_listado_de_eventos_incluye_horas_y_estado_de_agenda(self):
+        respuesta = self.client.get('/api/eventos/')
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn('horas_planificadas', respuesta.data[0])
+        self.assertEqual(respuesta.data[0]['estado_agenda'], 'activo')
+
+    def test_estado_agenda_pasado_cuando_todo_esta_hecho(self):
+        ayer = timezone.localdate() - timedelta(days=5)
+        evento = self.crear_evento(self.ana, nombre='Terminado', fecha_inicio=ayer, fecha_final=ayer)
+        self.crear_tarea(evento, ayer, estado='hecho')
+        respuesta = self.client.get(f'/api/eventos/{evento.id}/')
+        self.assertEqual(respuesta.data['estado_agenda'], 'pasado')
+
+    def test_estado_agenda_retrasado_cuando_quedan_gestiones_abiertas(self):
+        ayer = timezone.localdate() - timedelta(days=5)
+        evento = self.crear_evento(self.ana, nombre='Atrasado', fecha_inicio=ayer, fecha_final=ayer)
+        self.crear_tarea(evento, ayer, estado='pendiente')
+        respuesta = self.client.get(f'/api/eventos/{evento.id}/')
+        self.assertEqual(respuesta.data['estado_agenda'], 'retrasado')
+
+    def test_estado_agenda_tiene_prioridad_cuando_esta_cancelado(self):
+        self.client.patch(
+            f'/api/eventos/{self.evento.id}/',
+            {'cancelado': True},
+            format='json',
+        )
+        respuesta = self.client.get(f'/api/eventos/{self.evento.id}/')
+        self.assertTrue(respuesta.data['cancelado'])
+        self.assertEqual(respuesta.data['estado_agenda'], 'cancelado')
+
+
+class EventoCanceladoTests(BaseAPITest):
+    """Un evento cancelado deja de generar trabajo pendiente."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        self.evento = self.crear_evento(self.ana, nombre='Conferencia vieja')
+        self.gestion = self.crear_tarea(self.evento, timezone.localdate(), estimacion='4.00')
+
+    def test_hoy_omite_gestiones_de_eventos_cancelados(self):
+        respuesta = self.client.get('/api/hoy/')
+        self.assertEqual(respuesta.data['total'], 1)
+        self.client.patch(f'/api/eventos/{self.evento.id}/', {'cancelado': True}, format='json')
+        respuesta = self.client.get('/api/hoy/')
+        self.assertEqual(respuesta.data['total'], 0)
+
+    def test_las_gestiones_de_un_evento_cancelado_no_cuentan_en_la_sobrecarga(self):
+        hoy = timezone.localdate()
+        # Segunda gestión del mismo evento: sin la exclusión, 4 h + 4 h superarían el límite de 6 h.
+        otra_gestion = self.crear_tarea(self.evento, hoy, estimacion='4.00', titulo='Segunda')
+        self.client.patch(f'/api/eventos/{self.evento.id}/', {'cancelado': True}, format='json')
+        respuesta = self.client.patch(
+            f'/api/subtareas/{otra_gestion.id}/reprogramar/',
+            {'plazo': hoy.isoformat(), 'hora_limite': '18:00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+
+
+class MotivoMovimientoTests(BaseAPITest):
+    """El motivo del movimiento es opcional y se guarda con la gestión."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        self.evento = self.crear_evento(self.ana)
+        self.gestion = self.crear_tarea(self.evento, timezone.localdate() + timedelta(days=10))
+
+    def reprogramar(self, cuerpo):
+        return self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            cuerpo,
+            format='json',
+        )
+
+    def test_mover_sin_motivo_es_valido(self):
+        respuesta = self.reprogramar({'plazo': '2030-01-02', 'hora_limite': '15:00'})
+        self.assertEqual(respuesta.status_code, 200)
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.motivo_movimiento, '')
+
+    def test_motivo_se_guarda_con_la_gestion(self):
+        respuesta = self.reprogramar({
+            'plazo': '2030-01-02',
+            'hora_limite': '15:00',
+            'motivo_movimiento': '  El salón se liberó más tarde.  ',
+        })
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.data['motivo_movimiento'], 'El salón se liberó más tarde.')
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.motivo_movimiento, 'El salón se liberó más tarde.')
+
+    def test_hoy_expone_el_motivo_de_la_gestion(self):
+        self.reprogramar({'plazo': '2030-01-02', 'motivo_movimiento': 'Pendiente del proveedor'})
+        self.gestion.refresh_from_db()
+        # Se deja para hoy con una hora límite todavía por llegar.
+        self.gestion.plazo = timezone.localdate()
+        self.gestion.hora_limite = (timezone.localtime() + timedelta(hours=3)).time().replace(microsecond=0)
+        self.gestion.save()
+        respuesta = self.client.get('/api/hoy/')
+        motivos = [t['motivo_movimiento'] for t in respuesta.data['grupos']['para_hoy']]
+        self.assertIn('Pendiente del proveedor', motivos)
