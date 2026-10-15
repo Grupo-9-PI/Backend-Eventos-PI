@@ -13,6 +13,8 @@ urlpatterns = [
     path('auth/login/', views.LoginView.as_view(), name='login'),
     path('auth/logout/', views.LogoutView.as_view(), name='logout'),
     path('auth/me/', views.MeView.as_view(), name='me'),
+    path('auth/recuperar/', views.RecuperarPasswordView.as_view(), name='recuperar-password'),
+    path('auth/restablecer/', views.RestablecerPasswordView.as_view(), name='restablecer-password'),
 
     # Configuración del organizador (límite diario de horas) — GET / PUT / PATCH
     path('config/', views.ConfiguracionOrganizadorView.as_view(), name='config'),

@@ -367,3 +367,63 @@ datos que este descartaba. Cambios en `eventos/api`:
 | --- | --- |
 | `python manage.py test` | **54 pruebas, OK** (43 anteriores + 11 nuevas: `HorasPlanificadasTests` 6, `EventoCanceladoTests` 2, `MotivoMovimientoTests` 3). |
 | `manage.py makemigrations` | Genera solo la migración `0008`; el modelo y las migraciones están sincronizados. |
+
+
+---
+
+## Paridad front/back: plazos, estimación y recuperación de contraseña
+
+Se igualaron los contratos entre el formulario del frontend y el servidor.
+
+### Plazo de las gestiones (regla única)
+
+El **plazo nunca puede ser posterior al inicio del evento**, con el mismo mensaje en los tres
+caminos de escritura:
+
+- `POST/PUT /api/subtareas/` y `POST /api/eventos/<id>/subtareas/` → `SubtareaSerializer`.
+- `PATCH /api/subtareas/<id>/reprogramar/` → validación previa en la acción.
+- `POST /api/subtareas/<id>/resolver-conflicto/` (estrategia `mover_otro_dia`) → validación previa.
+
+Mensaje: `"El plazo de la gestión debe ser anterior o igual al inicio del evento."` (400). Las
+`fechas_sugeridas` de la sobrecarga se acotan con `fecha_tope` al inicio del evento: nunca
+proponen un día inválido.
+
+### Estimación de horas (regla única)
+
+- Mínimo **30 minutos** (`>= 0.50`) en la creación/edición de gestiones, en reprogramar y en la
+  estrategia `reducir_horas` del conflicto. Mensaje:
+  `"La estimación debe ser de al menos 30 minutos."` (400).
+- Máximo: la **duración total del evento** (`Evento.duracion_horas`), no el límite diario del
+  organizador. Se tolera el valor ya guardado para no bloquear la edición de gestiones antiguas.
+  Mensaje: `"La estimación no puede superar la duración total del evento (X h)."` (400).
+- El tope diario configurable sigue siendo una señal de planificación (409 SOBRECARGA_DIARIA),
+  no un límite de dato.
+
+### Hora límite calculada (comienzo + estimación)
+
+La hora límite **ya no la escribe el cliente**: el servidor la calcula como
+`hora_inicio + estimacion_horas` (dentro de las 24 h) al crear/editar gestiones, al reprogramar
+y al aplicar las estrategias del conflicto. Los formularios ahora capturan **Hora de comienzo**;
+si una gestión no tiene hora de comienzo, se sigue aceptando la `hora_limite` enviada
+(compatibilidad con datos y clientes anteriores).
+
+### Recuperación de contraseña (endpoints nuevos)
+
+| Método | Ruta | Qué hace |
+| --- | --- | --- |
+| POST | `/api/auth/recuperar/` | Con `{email}`: si la cuenta existe, envía un enlace `…/restablecer?uid=…&token=…`. Respuesta genérica (no revela si el correo está registrado). |
+| POST | `/api/auth/restablecer/` | Con `{uid, token, password}`: valida el token de un solo uso (Django), guarda la contraseña y **elimina los tokens de API abiertos**. |
+
+- Correo: `EMAIL_BACKEND` configurable por entorno; en desarrollo se usa el backend de consola
+  (el enlace aparece impreso en la consola del servidor) y el enlace se arma con `FRONTEND_URL`.
+- El frontend tiene la página `/restablecer` que consume estos endpoints; la página de solicitud
+  (`/recuperar`) ya llama al API real.
+
+### Verificación
+
+| Comprobación | Resultado |
+| --- | --- |
+| `python manage.py test` | **80 pruebas, OK** (63 anteriores + 17 nuevas: `RecuperacionPasswordTests` 5 y `ValidacionesGestionTests` 12). |
+| Flujo real por HTTP | Solicitar → correo en consola con enlace → restablecer → login con la nueva contraseña: OK. Token inválido y plazo tardío responden 400 con el mensaje exacto. |
+| `manage.py makemigrations --check` | Sin cambios (la recuperación no añade tablas). |
+| `manage.py spectacular --validate` | 0 errores, 0 advertencias con los dos endpoints nuevos. |

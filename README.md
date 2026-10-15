@@ -54,6 +54,8 @@ cd eventos
 | POST | `/api/auth/login/` | Pública | Devuelve el token del organizador. |
 | POST | `/api/auth/logout/` | Token | Invalida el token actual. |
 | GET | `/api/auth/me/` | Token | Datos del organizador autenticado. |
+| POST | `/api/auth/recuperar/` | Pública | Envía (o imprime en consola) el enlace de restablecimiento al correo. |
+| POST | `/api/auth/restablecer/` | Pública | Guarda la nueva contraseña con el `uid` + `token` del enlace. |
 | GET/PUT/PATCH | `/api/config/` | Token | Límite diario configurable de horas de gestión por organizador (default 6.00h). |
 | GET/POST | `/api/eventos/` | Token | Lista (solo propios) o crea eventos. |
 | GET/PUT/PATCH/DELETE | `/api/eventos/{id}/` | Token | Detalle y edición de un evento propio. |
