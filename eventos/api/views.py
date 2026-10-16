@@ -833,6 +833,8 @@ class SubtareaViewSet(viewsets.ModelViewSet):
                 subtarea.hora_limite = sumar_estimacion_a_hora(
                     subtarea.hora_inicio, subtarea.estimacion_horas
                 )
+            # Marca para destacar la gestión como reprogramada en la interfaz.
+            subtarea.reprogramada_en = timezone.now()
             subtarea.save()
 
         return Response(SubtareaSerializer(subtarea, context={'request': request}).data)
@@ -935,6 +937,8 @@ class ResolverConflictoView(APIView):
                 subtarea.hora_limite = sumar_estimacion_a_hora(
                     subtarea.hora_inicio, subtarea.estimacion_horas
                 )
+            # Marca para destacar la gestión como reprogramada en la interfaz.
+            subtarea.reprogramada_en = timezone.now()
 
             subtarea.save()
 

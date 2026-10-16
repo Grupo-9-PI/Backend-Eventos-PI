@@ -74,6 +74,12 @@ class Subtarea(models.Model):
     # Motivo opcional del último cambio de fecha/hora u horas de la gestión.
     motivo_movimiento = models.TextField(blank=True, default="", verbose_name="Motivo del movimiento")
 
+    # Cuándo se reprogramó por última vez (mover o resolver conflicto); sirve
+    # para destacar la gestión como «Reprogramada» en la interfaz.
+    reprogramada_en = models.DateTimeField(
+        null=True, blank=True, verbose_name="Reprogramada en"
+    )
+
     def __str__(self):
         return f"{self.gestion} - {self.evento.nombre}"
 

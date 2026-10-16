@@ -918,6 +918,65 @@ class MotivoMovimientoTests(BaseAPITest):
         self.assertIn('Pendiente del proveedor', motivos)
 
 
+class ReprogramadaTests(BaseAPITest):
+    """La gestión queda marcada cuando se mueve o se resuelve un conflicto."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        self.evento = self.crear_evento(
+            self.ana,
+            fecha_inicio=date(2030, 2, 1),
+            fecha_final=date(2030, 2, 5),
+        )
+        self.gestion = self.crear_tarea(self.evento, date(2030, 2, 1))
+
+    def test_una_gestion_nueva_no_esta_reprogramada(self):
+        self.assertIsNone(self.gestion.reprogramada_en)
+        respuesta = self.client.get(f'/api/eventos/{self.evento.id}/')
+        self.assertIsNone(respuesta.data['subtareas'][0]['reprogramada_en'])
+
+    def test_reprogramar_marca_la_gestion(self):
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': '2030-02-03'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIsNotNone(respuesta.data['reprogramada_en'])
+        self.gestion.refresh_from_db()
+        self.assertIsNotNone(self.gestion.reprogramada_en)
+
+    def test_resolver_conflicto_marca_la_gestion(self):
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {'estrategia': 'mover_otro_dia', 'plazo': '2030-02-02'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.gestion.refresh_from_db()
+        self.assertIsNotNone(self.gestion.reprogramada_en)
+
+    def test_hoy_expone_la_marca_de_reprogramacion(self):
+        self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': '2030-02-03'},
+            format='json',
+        )
+        self.gestion.refresh_from_db()
+        # Se deja para hoy con una hora límite por llegar (sin cruzar medianoche).
+        ahora = timezone.localtime()
+        limite = ahora + timedelta(hours=2)
+        if limite.date() != ahora.date():
+            limite = ahora.replace(hour=23, minute=59, second=59)
+        self.gestion.plazo = timezone.localdate()
+        self.gestion.hora_limite = limite.time().replace(microsecond=0)
+        self.gestion.save()
+        respuesta = self.client.get('/api/hoy/')
+        tarea = respuesta.data['grupos']['para_hoy'][0]
+        self.assertIsNotNone(tarea['reprogramada_en'])
+
+
 class ValidacionesGestionTests(BaseAPITest):
     """Reglas de plazo y estimación alineadas con el formulario del frontend."""
 
