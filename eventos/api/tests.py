@@ -514,7 +514,7 @@ class ReprogramarTests(BaseAPITest):
         )
         self.evento = self.crear_evento(
             self.ana,
-            fecha_inicio=DIA_REPROGRAM + timedelta(days=30),
+            fecha_inicio=DIA_REPROGRAM - timedelta(days=10),
             fecha_final=DIA_REPROGRAM + timedelta(days=30),
         )
         # Gestión existente en el día objetivo: 5h
@@ -584,8 +584,13 @@ class ReprogramarTests(BaseAPITest):
                 Decimal('6.00'),
                 sugerida,
             )
-            # Ninguna sugerencia puede quedar después del inicio del evento.
-            self.assertLessEqual(str(sugerida['fecha']), str(self.evento.fecha_inicio))
+            # Las sugerencias caen dentro de las fechas del evento.
+            self.assertGreaterEqual(
+                str(sugerida['fecha']), str(self.evento.fecha_inicio)
+            )
+            self.assertLessEqual(
+                str(sugerida['fecha']), str(self.evento.fecha_final)
+            )
 
     def test_reprogramar_no_cuenta_gestiones_hechas_en_la_suma(self):
         """Un día con 5h hechas y 0h abiertas no genera sobrecarga al mover 2h."""
@@ -643,7 +648,7 @@ class ResolverConflictoTests(BaseAPITest):
         )
         self.evento = self.crear_evento(
             self.ana,
-            fecha_inicio=DIA_REPROGRAM + timedelta(days=30),
+            fecha_inicio=DIA_REPROGRAM - timedelta(days=10),
             fecha_final=DIA_REPROGRAM + timedelta(days=30),
         )
         self.gestion = self.crear_tarea(
@@ -804,7 +809,14 @@ class EventoCanceladoTests(BaseAPITest):
     def setUp(self):
         self.ana = self.crear_usuario('ana@test.com', 'Ana')
         self.autenticar(self.ana)
-        self.evento = self.crear_evento(self.ana, nombre='Conferencia vieja')
+        hoy = timezone.localdate()
+        # El evento abarca hoy, el día al que se reprograma la segunda gestión.
+        self.evento = self.crear_evento(
+            self.ana,
+            nombre='Conferencia vieja',
+            fecha_inicio=hoy,
+            fecha_final=hoy,
+        )
         self.gestion = self.crear_tarea(self.evento, timezone.localdate(), estimacion='4.00')
 
     def test_hoy_omite_gestiones_de_eventos_cancelados(self):
@@ -833,12 +845,12 @@ class MotivoMovimientoTests(BaseAPITest):
     def setUp(self):
         self.ana = self.crear_usuario('ana@test.com', 'Ana')
         self.autenticar(self.ana)
-        # El evento arranca justo después del día al que se reprograman las
-        # gestiones de prueba (la regla exige plazo ≤ inicio del evento).
+        # El evento abarca el día al que se reprograman las gestiones de prueba
+        # (la regla exige plazo dentro de las fechas del evento).
         self.evento = self.crear_evento(
             self.ana,
-            fecha_inicio=date(2030, 1, 3),
-            fecha_final=date(2030, 1, 3),
+            fecha_inicio=date(2030, 1, 1),
+            fecha_final=date(2030, 1, 5),
         )
         self.gestion = self.crear_tarea(self.evento, timezone.localdate() + timedelta(days=10))
 
@@ -889,7 +901,12 @@ class ValidacionesGestionTests(BaseAPITest):
     def setUp(self):
         self.ana = self.crear_usuario('ana@test.com', 'Ana')
         self.autenticar(self.ana)
-        self.evento = self.crear_evento(self.ana)  # inicio: hoy + 30 días
+        # Rango amplio: el plazo de las gestiones vive dentro del evento.
+        self.evento = self.crear_evento(
+            self.ana,
+            fecha_inicio=timezone.localdate() + timedelta(days=10),
+            fecha_final=timezone.localdate() + timedelta(days=20),
+        )
 
     def payload(self, **cambios):
         datos = {
@@ -907,13 +924,29 @@ class ValidacionesGestionTests(BaseAPITest):
         respuesta = self.client.post('/api/subtareas/', self.payload(), format='json')
         self.assertEqual(respuesta.status_code, 201)
 
-    def test_crear_gestion_rechaza_plazo_posterior_al_inicio(self):
-        tarde = self.evento.fecha_inicio + timedelta(days=1)
+    def test_crear_gestion_rechaza_plazo_posterior_al_fin(self):
+        tarde = self.evento.fecha_final + timedelta(days=1)
         respuesta = self.client.post(
             '/api/subtareas/', self.payload(plazo=str(tarde)), format='json'
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn('plazo', respuesta.data)
+
+    def test_crear_gestion_rechaza_plazo_anterior_al_inicio(self):
+        temprano = self.evento.fecha_inicio - timedelta(days=1)
+        respuesta = self.client.post(
+            '/api/subtareas/', self.payload(plazo=str(temprano)), format='json'
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('plazo', respuesta.data)
+
+    def test_crear_gestion_acepta_plazo_igual_al_fin(self):
+        respuesta = self.client.post(
+            '/api/subtareas/',
+            self.payload(plazo=str(self.evento.fecha_final)),
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 201)
 
     def test_crear_gestion_acepta_estimacion_de_30_minutos(self):
         respuesta = self.client.post(
@@ -928,9 +961,9 @@ class ValidacionesGestionTests(BaseAPITest):
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn('estimacion_horas', respuesta.data)
 
-    def test_reprogramar_rechaza_plazo_posterior_al_inicio(self):
-        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio - timedelta(days=5))
-        tarde = self.evento.fecha_inicio + timedelta(days=2)
+    def test_reprogramar_rechaza_plazo_fuera_del_rango(self):
+        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio)
+        tarde = self.evento.fecha_final + timedelta(days=2)
         respuesta = self.client.patch(
             f'/api/subtareas/{gestion.id}/reprogramar/',
             {'plazo': str(tarde)},
@@ -939,8 +972,17 @@ class ValidacionesGestionTests(BaseAPITest):
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn('plazo', respuesta.data)
 
+    def test_reprogramar_acepta_plazo_en_los_dias_del_evento(self):
+        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio)
+        respuesta = self.client.patch(
+            f'/api/subtareas/{gestion.id}/reprogramar/',
+            {'plazo': str(self.evento.fecha_final)},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+
     def test_reprogramar_rechaza_estimacion_menor_a_30_minutos(self):
-        dia = self.evento.fecha_inicio - timedelta(days=5)
+        dia = self.evento.fecha_inicio
         gestion = self.crear_tarea(self.evento, dia)
         respuesta = self.client.patch(
             f'/api/subtareas/{gestion.id}/reprogramar/',
@@ -950,9 +992,9 @@ class ValidacionesGestionTests(BaseAPITest):
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn('estimacion_horas', respuesta.data)
 
-    def test_resolver_conflicto_rechaza_plazo_posterior_al_inicio(self):
-        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio - timedelta(days=5))
-        tarde = self.evento.fecha_inicio + timedelta(days=1)
+    def test_resolver_conflicto_rechaza_plazo_fuera_del_rango(self):
+        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio)
+        tarde = self.evento.fecha_final + timedelta(days=1)
         respuesta = self.client.post(
             f'/api/subtareas/{gestion.id}/resolver-conflicto/',
             {'estrategia': 'mover_otro_dia', 'plazo': str(tarde)},
@@ -962,7 +1004,7 @@ class ValidacionesGestionTests(BaseAPITest):
         self.assertIn('plazo', respuesta.data)
 
     def test_resolver_conflicto_rechaza_estimacion_menor_a_30_minutos(self):
-        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio - timedelta(days=5))
+        gestion = self.crear_tarea(self.evento, self.evento.fecha_inicio)
         respuesta = self.client.post(
             f'/api/subtareas/{gestion.id}/resolver-conflicto/',
             {'estrategia': 'reducir_horas', 'estimacion_horas': '0.20'},
@@ -995,7 +1037,7 @@ class ValidacionesGestionTests(BaseAPITest):
         self.assertIn('estimacion_horas', respuesta.data)
 
     def test_reprogramar_recalcula_la_hora_limite(self):
-        dia = self.evento.fecha_inicio - timedelta(days=5)
+        dia = self.evento.fecha_inicio
         gestion = self.crear_tarea(self.evento, dia)
         respuesta = self.client.patch(
             f'/api/subtareas/{gestion.id}/reprogramar/',

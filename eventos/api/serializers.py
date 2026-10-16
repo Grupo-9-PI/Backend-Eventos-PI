@@ -167,13 +167,17 @@ class SubtareaSerializer(serializers.ModelSerializer):
                 {"estimacion_horas": "La estimación debe ser de al menos 30 minutos."}
             )
 
-        # El plazo organiza trabajo logístico: nunca después del inicio del
-        # evento (la misma regla que aplica el formulario del frontend).
+        # El plazo vive dentro de las fechas del evento: entre el inicio y el
+        # fin (la misma regla que aplica el formulario del frontend).
         evento = data.get('evento', getattr(self.instance, 'evento', None))
         plazo = data.get('plazo', getattr(self.instance, 'plazo', None))
-        if evento is not None and plazo is not None and plazo > evento.fecha_inicio:
+        if (
+            evento is not None
+            and plazo is not None
+            and not (evento.fecha_inicio <= plazo <= evento.fecha_final)
+        ):
             raise serializers.ValidationError({
-                "plazo": "El plazo de la gestión debe ser anterior o igual al inicio del evento."
+                "plazo": "La fecha límite de la gestión debe estar entre el inicio y el fin del evento."
             })
 
         # La estimación depende de la duración total del evento; se tolera el
