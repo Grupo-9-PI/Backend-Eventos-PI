@@ -624,6 +624,29 @@ class ReprogramarTests(BaseAPITest):
         )
         self.assertEqual(respuesta.status_code, 401)
 
+    def test_fechas_sugeridas_cuando_el_dia_cargado_es_el_ultimo_del_evento(self):
+        """Con el día cargado al final del evento, sugiere los días libres previos."""
+        evento_corto = self.crear_evento(
+            self.ana,
+            nombre='Evento corto',
+            fecha_inicio=DIA_REPROGRAM - timedelta(days=3),
+            fecha_final=DIA_REPROGRAM,
+        )
+        gestion = self.crear_tarea(
+            evento_corto, DIA_REPROGRAM - timedelta(days=3), titulo='A mover'
+        )
+        self.crear_tarea(evento_corto, DIA_REPROGRAM, estimacion='5.00', titulo='Cargada')
+        respuesta = self.client.patch(
+            f'/api/subtareas/{gestion.id}/reprogramar/',
+            {'plazo': str(DIA_REPROGRAM)},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 409)
+        sugeridas = respuesta.data['fechas_sugeridas']
+        self.assertTrue(sugeridas, 'Debe sugerir los días libres anteriores')
+        for sugerida in sugeridas:
+            self.assertLessEqual(str(sugerida['fecha']), str(DIA_REPROGRAM))
+
     def test_reprogramar_no_aplica_a_gestion_ajena(self):
         beto = self.crear_usuario('beto@test.com', 'Beto')
         self.autenticar(beto)
