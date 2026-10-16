@@ -386,7 +386,8 @@ mismo mensaje en los tres caminos de escritura:
 
 Mensaje: `"La fecha límite de la gestión debe estar entre el inicio y el fin del evento."` (400).
 Las `fechas_sugeridas` de la sobrecarga se acotan con `fecha_piso`/`fecha_tope` a las fechas del
-evento: nunca proponen un día inválido.
+evento y se recorren del día más cercano al más lejano (anteriores y posteriores al conflicto):
+nunca proponen un día inválido ni dejan la lista vacía cuando la ventana tiene días con capacidad.
 
 ### Estimación de horas (regla única)
 
@@ -423,7 +424,7 @@ si una gestión no tiene hora de comienzo, se sigue aceptando la `hora_limite` e
 
 | Comprobación | Resultado |
 | --- | --- |
-| `python manage.py test` | **83 pruebas, OK** (63 anteriores + 20 nuevas: `RecuperacionPasswordTests` 5 y `ValidacionesGestionTests` 15). |
+| `python manage.py test` | **84 pruebas, OK** (63 anteriores + 21 nuevas: `RecuperacionPasswordTests` 5, `ValidacionesGestionTests` 15 y 1 de regresión en `ReprogramarTests`). |
 | Flujo real por HTTP | Solicitar → correo en consola con enlace → restablecer → login con la nueva contraseña: OK. Token inválido y plazo tardío responden 400 con el mensaje exacto. |
 | `manage.py makemigrations --check` | Sin cambios (la recuperación no añade tablas). |
 | `manage.py spectacular --validate` | 0 errores, 0 advertencias con los dos endpoints nuevos. |

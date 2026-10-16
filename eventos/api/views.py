@@ -589,20 +589,35 @@ def _calcular_sobrecarga(usuario, fecha_nueva, estimacion_nueva, excluir_subtare
 def _sugerir_fechas(usuario, fecha_base, estimacion_nueva, excluir_subtarea_id=None,
                     horizonte_dias=90, maximo=3, fecha_tope=None, fecha_piso=None):
     """
-    Sugiere días próximos en los que la gestión cabe sin superar el límite diario.
+    Sugiere días cercanos en los que la gestión cabe sin superar el límite diario.
 
-    Recorre desde el día siguiente a `fecha_base` hasta `horizonte_dias` (o hasta
-    `fecha_tope`, la fecha máxima válida —el fin del evento—) y devuelve hasta
-    `maximo` fechas dentro de la ventana del evento ([`fecha_piso`, `fecha_tope`])
-    con su carga total proyectada.
+    Con la ventana del evento ([`fecha_piso`, `fecha_tope`]) recorre TODOS sus
+    días (anteriores y posteriores a `fecha_base`), del más cercano al más
+    lejano. Sin ventana, avanza desde el día siguiente hasta `horizonte_dias`.
     """
+    if fecha_piso is not None and fecha_tope is not None:
+        candidatas = [
+            fecha_piso + timedelta(days=dias)
+            for dias in range((fecha_tope - fecha_piso).days + 1)
+        ]
+        candidatas = [fecha for fecha in candidatas if fecha != fecha_base]
+        # Más cercanas primero; en empate, la más lejana en el tiempo (posponer).
+        candidatas.sort(key=lambda fecha: (
+            abs((fecha - fecha_base).days), -fecha.toordinal()
+        ))
+        candidatas = candidatas[: max(horizonte_dias * 2, maximo)]
+    else:
+        candidatas = [
+            fecha_base + timedelta(days=dias)
+            for dias in range(1, horizonte_dias + 1)
+        ]
+        if fecha_tope is not None:
+            candidatas = [fecha for fecha in candidatas if fecha <= fecha_tope]
+        if fecha_piso is not None:
+            candidatas = [fecha for fecha in candidatas if fecha >= fecha_piso]
+
     sugeridas = []
-    for dias in range(1, horizonte_dias + 1):
-        fecha = fecha_base + timedelta(days=dias)
-        if fecha_tope is not None and fecha > fecha_tope:
-            break
-        if fecha_piso is not None and fecha < fecha_piso:
-            continue
+    for fecha in candidatas:
         cifras = _cifras_dia(usuario, fecha, estimacion_nueva, excluir_subtarea_id)
         if cifras['horas_exceso'] <= 0:
             sugeridas.append({
