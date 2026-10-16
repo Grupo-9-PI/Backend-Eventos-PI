@@ -149,9 +149,12 @@ class SubtareaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Subtarea
         fields = '__all__'
-        # La hora límite la calcula el servidor (comienzo + estimación); solo
-        # se acepta del cliente cuando la gestión no tiene hora de comienzo.
-        extra_kwargs = {'hora_limite': {'required': False}}
+        # La hora límite la calcula el servidor (comienzo + estimación) y la
+        # fecha de reprogramación la escribe el servidor al mover la gestión.
+        extra_kwargs = {
+            'hora_limite': {'required': False},
+            'reprogramada_en': {'read_only': True},
+        }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -290,6 +293,7 @@ class TareaHoySerializer(serializers.ModelSerializer):
             'hora_inicio',
             'estimacion_horas',
             'motivo_movimiento',
+            'reprogramada_en',
             'evento',
         ]
 

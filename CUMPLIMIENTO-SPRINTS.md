@@ -408,6 +408,12 @@ y al aplicar las estrategias del conflicto. Los formularios ahora capturan **Hor
 si una gestión no tiene hora de comienzo, se sigue aceptando la `hora_limite` enviada
 (compatibilidad con datos y clientes anteriores).
 
+### Marca de reprogramación (migración `0009_subtarea_reprogramada_en`)
+
+`Subtarea.reprogramada_en` (fecha y hora, solo lectura) se actualiza al reprogramar una gestión
+y al resolver un conflicto (ambas estrategias). Viaja en `SubtareaSerializer` y en
+`TareaHoySerializer` para que la interfaz destaque la gestión con un **«Reprogramada»**.
+
 ### Recuperación de contraseña (endpoints nuevos)
 
 | Método | Ruta | Qué hace |
@@ -424,7 +430,7 @@ si una gestión no tiene hora de comienzo, se sigue aceptando la `hora_limite` e
 
 | Comprobación | Resultado |
 | --- | --- |
-| `python manage.py test` | **84 pruebas, OK** (63 anteriores + 21 nuevas: `RecuperacionPasswordTests` 5, `ValidacionesGestionTests` 15 y 1 de regresión en `ReprogramarTests`). |
+| `python manage.py test` | **88 pruebas, OK** (63 anteriores + 25 nuevas: `RecuperacionPasswordTests` 5, `ValidacionesGestionTests` 15, `ReprogramadaTests` 4 y 1 de regresión en `ReprogramarTests`). |
 | Flujo real por HTTP | Solicitar → correo en consola con enlace → restablecer → login con la nueva contraseña: OK. Token inválido y plazo tardío responden 400 con el mensaje exacto. |
 | `manage.py makemigrations --check` | Sin cambios (la recuperación no añade tablas). |
 | `manage.py spectacular --validate` | 0 errores, 0 advertencias con los dos endpoints nuevos. |
