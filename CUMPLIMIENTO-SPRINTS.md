@@ -377,16 +377,16 @@ Se igualaron los contratos entre el formulario del frontend y el servidor.
 
 ### Plazo de las gestiones (regla única)
 
-El **plazo nunca puede ser posterior al inicio del evento**, con el mismo mensaje en los tres
-caminos de escritura:
+El **plazo vive dentro de las fechas del evento**: entre `fecha_inicio` y `fecha_final`, con el
+mismo mensaje en los tres caminos de escritura:
 
 - `POST/PUT /api/subtareas/` y `POST /api/eventos/<id>/subtareas/` → `SubtareaSerializer`.
 - `PATCH /api/subtareas/<id>/reprogramar/` → validación previa en la acción.
 - `POST /api/subtareas/<id>/resolver-conflicto/` (estrategia `mover_otro_dia`) → validación previa.
 
-Mensaje: `"El plazo de la gestión debe ser anterior o igual al inicio del evento."` (400). Las
-`fechas_sugeridas` de la sobrecarga se acotan con `fecha_tope` al inicio del evento: nunca
-proponen un día inválido.
+Mensaje: `"La fecha límite de la gestión debe estar entre el inicio y el fin del evento."` (400).
+Las `fechas_sugeridas` de la sobrecarga se acotan con `fecha_piso`/`fecha_tope` a las fechas del
+evento: nunca proponen un día inválido.
 
 ### Estimación de horas (regla única)
 
@@ -423,7 +423,7 @@ si una gestión no tiene hora de comienzo, se sigue aceptando la `hora_limite` e
 
 | Comprobación | Resultado |
 | --- | --- |
-| `python manage.py test` | **80 pruebas, OK** (63 anteriores + 17 nuevas: `RecuperacionPasswordTests` 5 y `ValidacionesGestionTests` 12). |
+| `python manage.py test` | **83 pruebas, OK** (63 anteriores + 20 nuevas: `RecuperacionPasswordTests` 5 y `ValidacionesGestionTests` 15). |
 | Flujo real por HTTP | Solicitar → correo en consola con enlace → restablecer → login con la nueva contraseña: OK. Token inválido y plazo tardío responden 400 con el mensaje exacto. |
 | `manage.py makemigrations --check` | Sin cambios (la recuperación no añade tablas). |
 | `manage.py spectacular --validate` | 0 errores, 0 advertencias con los dos endpoints nuevos. |

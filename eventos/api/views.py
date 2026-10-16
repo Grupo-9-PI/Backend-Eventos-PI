@@ -587,19 +587,22 @@ def _calcular_sobrecarga(usuario, fecha_nueva, estimacion_nueva, excluir_subtare
 
 
 def _sugerir_fechas(usuario, fecha_base, estimacion_nueva, excluir_subtarea_id=None,
-                    horizonte_dias=90, maximo=3, fecha_tope=None):
+                    horizonte_dias=90, maximo=3, fecha_tope=None, fecha_piso=None):
     """
     Sugiere días próximos en los que la gestión cabe sin superar el límite diario.
 
     Recorre desde el día siguiente a `fecha_base` hasta `horizonte_dias` (o hasta
-    `fecha_tope`, la fecha máxima válida —el inicio del evento—) y devuelve hasta
-    `maximo` fechas con su carga total proyectada.
+    `fecha_tope`, la fecha máxima válida —el fin del evento—) y devuelve hasta
+    `maximo` fechas dentro de la ventana del evento ([`fecha_piso`, `fecha_tope`])
+    con su carga total proyectada.
     """
     sugeridas = []
     for dias in range(1, horizonte_dias + 1):
         fecha = fecha_base + timedelta(days=dias)
         if fecha_tope is not None and fecha > fecha_tope:
             break
+        if fecha_piso is not None and fecha < fecha_piso:
+            continue
         cifras = _cifras_dia(usuario, fecha, estimacion_nueva, excluir_subtarea_id)
         if cifras['horas_exceso'] <= 0:
             sugeridas.append({
@@ -675,8 +678,9 @@ class SubtareaViewSet(viewsets.ModelViewSet):
         description=(
             'Cambia el plazo, la hora límite, el comienzo y/o la estimación de horas de una\n'
             'gestión, y opcionalmente el **motivo** del cambio (`motivo_movimiento`, opcional).\n\n'
-            'El **plazo** no puede ser posterior al inicio del evento y la **estimación** no puede\n'
-            'superar la duración total del evento: son las mismas reglas que valida el formulario.\n\n'
+            'El **plazo** debe estar entre el inicio y el fin del evento y la **estimación** no\n'
+            'puede superar la duración total del evento: son las mismas reglas que valida el\n'
+            'formulario del frontend.\n\n'
             'La **hora límite** no la escribe el cliente: el servidor la calcula como comienzo +\n'
             'estimación (`hora_inicio + estimacion_horas`).\n\n'
             '**Lógica de sobrecarga:** si la nueva fecha ya acumula más horas que el límite '
@@ -744,10 +748,10 @@ class SubtareaViewSet(viewsets.ModelViewSet):
         fecha_nueva = datos.get('plazo', subtarea.plazo)
         estimacion_nueva = datos.get('estimacion_horas', subtarea.estimacion_horas)
 
-        # Misma regla que el formulario: el plazo nunca pasa del inicio del evento.
-        if fecha_nueva > subtarea.evento.fecha_inicio:
+        # Misma regla que el formulario: el plazo vive dentro de las fechas del evento.
+        if not (subtarea.evento.fecha_inicio <= fecha_nueva <= subtarea.evento.fecha_final):
             return Response(
-                {'plazo': 'El plazo de la gestión debe ser anterior o igual al inicio del evento.'},
+                {'plazo': 'La fecha límite de la gestión debe estar entre el inicio y el fin del evento.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -791,7 +795,8 @@ class SubtareaViewSet(viewsets.ModelViewSet):
                     fecha_base=fecha_nueva,
                     estimacion_nueva=estimacion_nueva,
                     excluir_subtarea_id=subtarea.pk,
-                    fecha_tope=subtarea.evento.fecha_inicio,
+                    fecha_piso=subtarea.evento.fecha_inicio,
+                    fecha_tope=subtarea.evento.fecha_final,
                 ),
             }
             return Response(cuerpo, status=status.HTTP_409_CONFLICT)
@@ -830,8 +835,8 @@ class ResolverConflictoView(APIView):
             'Aplica la estrategia elegida por el organizador para resolver el conflicto de '
             'sobrecarga detectado al reprogramar, y **recalcula** el día para confirmar el resultado.\n\n'
             '**Estrategias disponibles:**\n'
-            '- `mover_otro_dia`: mueve la gestión al `plazo` indicado, que no puede ser '
-            'posterior al inicio del evento.\n'
+            '- `mover_otro_dia`: mueve la gestión al `plazo` indicado, que debe estar '
+            'entre el inicio y el fin del evento.\n'
             '- `reducir_horas`: cambia la `estimacion_horas` de la gestión al valor indicado; '
             'mantiene el plazo original.\n\n'
             'Si el conflicto persiste tras aplicar el cambio, la respuesta lo indica con '
@@ -885,9 +890,9 @@ class ResolverConflictoView(APIView):
                         {'plazo': "Se requiere 'plazo' para la estrategia 'mover_otro_dia'."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                if datos['plazo'] > subtarea.evento.fecha_inicio:
+                if not (subtarea.evento.fecha_inicio <= datos['plazo'] <= subtarea.evento.fecha_final):
                     return Response(
-                        {'plazo': 'El plazo de la gestión debe ser anterior o igual al inicio del evento.'},
+                        {'plazo': 'La fecha límite de la gestión debe estar entre el inicio y el fin del evento.'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 subtarea.plazo = datos['plazo']
@@ -954,6 +959,7 @@ class ResolverConflictoView(APIView):
                 fecha_base=subtarea.plazo,
                 estimacion_nueva=subtarea.estimacion_horas,
                 excluir_subtarea_id=subtarea.pk,
-                fecha_tope=subtarea.evento.fecha_inicio,
+                fecha_piso=subtarea.evento.fecha_inicio,
+                fecha_tope=subtarea.evento.fecha_final,
             )
         return Response(cuerpo)
