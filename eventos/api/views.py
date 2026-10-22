@@ -26,6 +26,7 @@ from .serializers import (
     ErrorConflictoSerializer,
     EventoSerializer,
     LoginSerializer,
+    PosponerTareaSerializer,
     RecuperarPasswordSerializer,
     RegistroSerializer,
     ReprogramarTareaSerializer,
@@ -54,7 +55,7 @@ EJEMPLO_RESPUESTA_CONFLICTO = {
     "horas_nueva_gestion": "2.50",
     "horas_totales_proyectadas": "7.50",
     "horas_exceso": "1.50",
-    "estrategias_disponibles": ["mover_otro_dia", "reducir_horas"],
+    "estrategias_disponibles": ["mover_otro_dia", "reducir_horas", "posponer"],
     "fechas_sugeridas": [
         {"fecha": "2026-10-16", "horas_totales_proyectadas": "2.50"},
         {"fecha": "2026-10-17", "horas_totales_proyectadas": "2.50"},
@@ -439,7 +440,8 @@ class HoyView(APIView):
             'comparten fecha, va primero la de menor esfuerzo estimado; ante un empate total se usa '
             'la hora límite.\n\n'
             '**Filtros:** `evento` limita a un evento propio y `estado` acepta `abiertas` (por '
-            'defecto: pendientes y en progreso), `pendiente`, `en_progreso`, `hecho` o `todas`.\n\n'
+            'defecto: pendientes y en progreso), `pendiente`, `en_progreso`, `hecho`, '
+            '`pospuesta` o `todas`.\n\n'
             '**Eventos cancelados:** sus gestiones no aparecen en esta vista, porque un evento '
             'cancelado deja de generar trabajo pendiente.'
         ),
@@ -457,7 +459,7 @@ class HoyView(APIView):
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 required=False,
-                enum=['abiertas', 'pendiente', 'en_progreso', 'hecho', 'todas'],
+                enum=['abiertas', 'pendiente', 'en_progreso', 'hecho', 'pospuesta', 'todas'],
                 default='abiertas',
                 description='Estado de la gestión por el que se filtra.',
                 examples=[
@@ -497,14 +499,15 @@ class HoyView(APIView):
 
         estado = request.query_params.get('estado', 'abiertas')
         if estado == 'abiertas':
-            tareas = tareas.exclude(estado='hecho')
+            # Una gestión pospuesta tampoco forma parte de la carga abierta.
+            tareas = tareas.exclude(estado__in=['hecho', 'pospuesta'])
         elif estado == 'todas':
             pass
         elif estado in dict(Subtarea.OPCIONES_ESTADO):
             tareas = tareas.filter(estado=estado)
         else:
             return Response(
-                {'estado': 'Estado inválido. Opciones: abiertas, pendiente, en_progreso, hecho, todas.'},
+                {'estado': 'Estado inválido. Opciones: abiertas, pendiente, en_progreso, hecho, pospuesta, todas.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -550,15 +553,16 @@ def _cifras_dia(usuario, fecha, estimacion_nueva, excluir_subtarea_id=None):
     """
     Calcula las cifras de carga de un día para el organizador.
 
-    Solo cuentan las gestiones abiertas (se excluyen las hechas) y opcionalmente
-    se ignora una gestión (la que se está reprogramando) para no contarla dos veces.
+    Solo cuentan las gestiones abiertas (se excluyen las hechas y las pospuestas)
+    y opcionalmente se ignora una gestión (la que se está reprogramando) para no
+    contarla dos veces.
     """
     limite = _obtener_limite_organizador(usuario)
     qs = Subtarea.objects.filter(
         evento__propietario=usuario,
         evento__cancelado=False,
         plazo=fecha,
-    ).exclude(estado='hecho')
+    ).exclude(estado__in=['hecho', 'pospuesta'])
     if excluir_subtarea_id is not None:
         qs = qs.exclude(pk=excluir_subtarea_id)
 
@@ -702,7 +706,7 @@ class SubtareaViewSet(viewsets.ModelViewSet):
             'diario del organizador (configurable en `/api/config/`), el servidor **aborta la '
             'transacción** y devuelve `409 Conflict` con las cifras exactas del exceso para que '
             'el frontend pueda mostrar un diálogo de conflicto comprensible al usuario.\n\n'
-            'El cálculo solo cuenta gestiones abiertas (excluye las hechas) y responde también '
+            'El cálculo solo cuenta gestiones abiertas (excluye las hechas y las pospuestas) y responde también '
             '**`fechas_sugeridas`**: días próximos en los que la gestión cabe sin superar el límite.\n\n'
             'Si no hay sobrecarga, persiste el cambio y devuelve la gestión actualizada.'
         ),
@@ -804,7 +808,7 @@ class SubtareaViewSet(viewsets.ModelViewSet):
                     f"Elige una estrategia para resolver el conflicto."
                 ),
                 **conflicto,
-                'estrategias_disponibles': ['mover_otro_dia', 'reducir_horas'],
+                'estrategias_disponibles': ['mover_otro_dia', 'reducir_horas', 'posponer'],
                 'fechas_sugeridas': _sugerir_fechas(
                     usuario=request.user,
                     fecha_base=fecha_nueva,
@@ -839,6 +843,72 @@ class SubtareaViewSet(viewsets.ModelViewSet):
 
         return Response(SubtareaSerializer(subtarea, context={'request': request}).data)
 
+    @extend_schema(
+        tags=['subtareas'],
+        summary='Posponer una gestión (con fecha opcional)',
+        description=(
+            'Marca la gestión como **pospuesta** y guarda un motivo opcional. '
+            'Si se envía `plazo`, también la mueve a esa fecha; si no, conserva '
+            'su fecha actual y solo cambia de estado.\n\n'
+            'Una gestión pospuesta **no cuenta** en la carga diaria ni en la '
+            'detección de sobrecarga, por eso este endpoint no responde 409: '
+            'posponer la saca del trabajo planificado del día.\n\n'
+            'El `plazo` debe estar entre el inicio y el fin del evento. La hora '
+            'límite se recalcula como comienzo + estimación cuando se envía '
+            '`hora_inicio`.'
+        ),
+        request=PosponerTareaSerializer,
+        responses={200: SubtareaSerializer, 400: OpenApiTypes.OBJECT},
+        examples=[
+            OpenApiExample(
+                'Posponer sin cambiar la fecha',
+                value={"nota_pospuesta": "Esperando confirmación del salón."},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Posponer y mover a otro día',
+                value={
+                    "plazo": "2026-10-25",
+                    "hora_inicio": "09:00",
+                    "nota_pospuesta": "El proveedor confirmó para el lunes.",
+                },
+                request_only=True,
+            ),
+        ],
+    )
+    @action(detail=True, methods=['patch'], url_path='posponer')
+    def posponer(self, request, pk=None):
+        subtarea = self.get_object()  # 404 si es de otro organizador
+        ser = PosponerTareaSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        datos = ser.validated_data
+
+        fecha_nueva = datos.get('plazo')
+        if fecha_nueva is not None and not (
+            subtarea.evento.fecha_inicio <= fecha_nueva <= subtarea.evento.fecha_final
+        ):
+            return Response(
+                {'plazo': 'La fecha límite de la gestión debe estar entre el inicio y el fin del evento.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            if fecha_nueva is not None:
+                subtarea.plazo = fecha_nueva
+                # Es un movimiento de fecha, aunque la gestión quede pospuesta.
+                subtarea.reprogramada_en = timezone.now()
+            if 'hora_inicio' in datos:
+                subtarea.hora_inicio = datos['hora_inicio']
+            if subtarea.hora_inicio is not None:
+                subtarea.hora_limite = sumar_estimacion_a_hora(
+                    subtarea.hora_inicio, subtarea.estimacion_horas
+                )
+            subtarea.estado = 'pospuesta'
+            subtarea.nota_pospuesta = datos.get('nota_pospuesta', '').strip()
+            subtarea.save()
+
+        return Response(SubtareaSerializer(subtarea, context={'request': request}).data)
+
 
 # ---------------------------------------------------------------------------
 # Reprogramar con fuerza / resolución de conflicto elegida por el usuario
@@ -855,7 +925,9 @@ class ResolverConflictoView(APIView):
             '- `mover_otro_dia`: mueve la gestión al `plazo` indicado, que debe estar '
             'entre el inicio y el fin del evento.\n'
             '- `reducir_horas`: cambia la `estimacion_horas` de la gestión al valor indicado; '
-            'mantiene el plazo original.\n\n'
+            'mantiene el plazo original.\n'
+            '- `posponer`: marca la gestión como pospuesta y guarda `nota_pospuesta`; '
+            'sale de la carga del día sin cambiar su fecha.\n\n'
             'Si el conflicto persiste tras aplicar el cambio, la respuesta lo indica con '
             '`resuelto: false`, las nuevas cifras y `fechas_sugeridas` para seguir resolviendo.'
         ),
@@ -874,6 +946,11 @@ class ResolverConflictoView(APIView):
             OpenApiExample(
                 'Estrategia: reducir horas',
                 value={"estrategia": "reducir_horas", "estimacion_horas": "1.00"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                'Estrategia: posponer',
+                value={"estrategia": "posponer", "nota_pospuesta": "Esperando confirmación del proveedor."},
                 request_only=True,
             ),
             OpenApiExample(
@@ -932,13 +1009,18 @@ class ResolverConflictoView(APIView):
                     )
                 subtarea.estimacion_horas = datos['estimacion_horas']
 
+            elif estrategia == 'posponer':
+                subtarea.estado = 'pospuesta'
+                subtarea.nota_pospuesta = datos.get('nota_pospuesta', '').strip()
+
             # La hora límite la calcula el servidor: comienzo + estimación.
             if subtarea.hora_inicio is not None:
                 subtarea.hora_limite = sumar_estimacion_a_hora(
                     subtarea.hora_inicio, subtarea.estimacion_horas
                 )
-            # Marca para destacar la gestión como reprogramada en la interfaz.
-            subtarea.reprogramada_en = timezone.now()
+            # Posponer no es una reprogramación: no debe mostrar la etiqueta.
+            if estrategia != 'posponer':
+                subtarea.reprogramada_en = timezone.now()
 
             subtarea.save()
 
@@ -950,7 +1032,13 @@ class ResolverConflictoView(APIView):
             excluir_subtarea_id=subtarea.pk,
         )
         resuelto = cifras['horas_exceso'] <= 0
-        if resuelto:
+        if estrategia == 'posponer':
+            mensaje = (
+                f"Gestión pospuesta. El {subtarea.plazo.strftime('%d/%m/%Y')} queda con "
+                f"{cifras['horas_totales_proyectadas']}h planificadas de las "
+                f"{cifras['limite_horas']}h de límite diario."
+            )
+        elif resuelto:
             mensaje = (
                 f"Conflicto resuelto. El {subtarea.plazo.strftime('%d/%m/%Y')} queda con "
                 f"{cifras['horas_totales_proyectadas']}h planificadas de las "

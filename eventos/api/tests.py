@@ -372,6 +372,21 @@ class HoyTests(BaseAPITest):
         respuesta = self.client.get('/api/hoy/')
         self.assertEqual(respuesta.data['total'], 5)
 
+    def test_excluye_las_pospuestas_por_defecto_y_permite_filtrarlas(self):
+        self.crear_tarea(
+            self.evento, FECHA_FIJA, estado='pospuesta',
+            titulo='Pospuesta', hora='18:00',
+        )
+        self.autenticar(self.ana)
+        respuesta = self.client.get('/api/hoy/')
+        self.assertEqual(respuesta.data['total'], 5)
+        respuesta = self.client.get('/api/hoy/', {'estado': 'pospuesta'})
+        self.assertEqual(
+            [t['titulo'] for t in respuesta.data['grupos']['para_hoy']],
+            ['Pospuesta'],
+        )
+        self.assertEqual(respuesta.data['total'], 1)
+
     def test_filtra_por_estado(self):
         self.crear_tarea(self.evento, FECHA_FIJA, estado='hecho', titulo='Terminada', hora='18:00')
         self.autenticar(self.ana)
@@ -606,6 +621,20 @@ class ReprogramarTests(BaseAPITest):
         )
         self.assertEqual(respuesta.status_code, 200)
 
+    def test_reprogramar_no_cuenta_gestiones_pospuestas_en_la_suma(self):
+        """Una gestión pospuesta tampoco ocupa capacidad del día."""
+        dia_con_pospuestas = DIA_REPROGRAM + timedelta(days=21)
+        self.crear_tarea(
+            self.evento, dia_con_pospuestas, estimacion='5.00',
+            estado='pospuesta', titulo='Pospuesta',
+        )
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/reprogramar/',
+            {'plazo': str(dia_con_pospuestas), 'hora_limite': '10:00'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+
     def test_reprogramar_con_reduccion_evita_conflicto(self):
         """Mover al día cargado pero reduciendo a 0.5h (total 5.5h < 6h) → 200."""
         respuesta = self.client.patch(
@@ -696,6 +725,26 @@ class ResolverConflictoTests(BaseAPITest):
         )
         self.assertEqual(Decimal(respuesta.data['horas_exceso']), Decimal('0'))
 
+    def test_estrategia_posponer_marca_estado_y_nota(self):
+        respuesta = self.client.post(
+            f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
+            {
+                'estrategia': 'posponer',
+                'nota_pospuesta': 'Esperando confirmación del proveedor.',
+            },
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.estado, 'pospuesta')
+        self.assertEqual(
+            self.gestion.nota_pospuesta,
+            'Esperando confirmación del proveedor.',
+        )
+        self.assertEqual(self.gestion.plazo, DIA_REPROGRAM)
+        self.assertTrue(respuesta.data['resuelto'])
+        self.assertEqual(respuesta.data['subtarea']['estado'], 'pospuesta')
+
     def test_estrategia_reducir_horas_persiste_nueva_estimacion(self):
         respuesta = self.client.post(
             f'/api/subtareas/{self.gestion.id}/resolver-conflicto/',
@@ -773,6 +822,147 @@ class ResolverConflictoTests(BaseAPITest):
             format='json',
         )
         self.assertEqual(respuesta.status_code, 401)
+
+
+class PospuestaTests(BaseAPITest):
+    """US-09: posponer una gestión con nota y fecha opcional."""
+
+    def setUp(self):
+        self.ana = self.crear_usuario('ana@test.com', 'Ana')
+        self.autenticar(self.ana)
+        ConfiguracionOrganizador.objects.update_or_create(
+            usuario=self.ana, defaults={'limite_diario_horas': '6.00'}
+        )
+        self.evento = self.crear_evento(
+            self.ana,
+            fecha_inicio=DIA_REPROGRAM - timedelta(days=10),
+            fecha_final=DIA_REPROGRAM + timedelta(days=30),
+        )
+        self.gestion = self.crear_tarea(
+            self.evento, DIA_REPROGRAM, estimacion='3.00',
+            titulo='A posponer', hora='12:00',
+        )
+
+    def test_crear_gestion_pospuesta_guarda_la_nota(self):
+        respuesta = self.client.post(
+            '/api/subtareas/',
+            {
+                'evento': self.evento.id,
+                'gestion': 'Pospuesta desde el formulario',
+                'categoria': 'OTRO',
+                'estado': 'pospuesta',
+                'prioridad': 'media',
+                'estimacion_horas': '1.50',
+                'plazo': str(DIA_REPROGRAM + timedelta(days=1)),
+                'hora_inicio': '09:00',
+                'nota_pospuesta': 'Falta confirmar el proveedor.',
+            },
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.data)
+        self.assertEqual(respuesta.data['estado'], 'pospuesta')
+        self.assertEqual(
+            respuesta.data['nota_pospuesta'],
+            'Falta confirmar el proveedor.',
+        )
+
+    def test_posponer_sin_fecha_conserva_plazo_y_guarda_nota(self):
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/posponer/',
+            {'nota_pospuesta': '  Esperando respuesta del salón.  '},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.data)
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.estado, 'pospuesta')
+        self.assertEqual(self.gestion.plazo, DIA_REPROGRAM)
+        self.assertEqual(
+            self.gestion.nota_pospuesta,
+            'Esperando respuesta del salón.',
+        )
+        self.assertIsNone(self.gestion.reprogramada_en)
+
+    def test_posponer_con_fecha_mueve_y_recalcula_hora_limite(self):
+        nuevo_dia = DIA_REPROGRAM + timedelta(days=2)
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/posponer/',
+            {
+                'plazo': str(nuevo_dia),
+                'hora_inicio': '10:00',
+                'nota_pospuesta': 'El proveedor confirmó para el lunes.',
+            },
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.data)
+        self.gestion.refresh_from_db()
+        self.assertEqual(self.gestion.plazo, nuevo_dia)
+        self.assertEqual(self.gestion.estado, 'pospuesta')
+        self.assertEqual(self.gestion.hora_limite.strftime('%H:%M'), '13:00')
+        self.assertIsNotNone(self.gestion.reprogramada_en)
+
+    def test_posponer_con_fecha_fuera_del_evento_devuelve_400(self):
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/posponer/',
+            {'plazo': str(self.evento.fecha_final + timedelta(days=1))},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('plazo', respuesta.data)
+
+    def test_posponer_no_genera_conflicto_aunque_el_dia_este_cargado(self):
+        """Una gestión pospuesta no ocupa capacidad, aunque el día tenga 5h."""
+        dia_cargado = DIA_REPROGRAM + timedelta(days=3)
+        self.crear_tarea(
+            self.evento, dia_cargado, estimacion='5.00',
+            titulo='Día cargado',
+        )
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/posponer/',
+            {'plazo': str(dia_cargado)},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 200, respuesta.data)
+
+    def test_posponer_no_aplica_a_gestion_ajena(self):
+        beto = self.crear_usuario('beto@test.com', 'Beto')
+        self.autenticar(beto)
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/posponer/',
+            {'nota_pospuesta': 'No debería poder.'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 404)
+
+    def test_posponer_requiere_token(self):
+        self.client.credentials()
+        respuesta = self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/posponer/',
+            {'nota_pospuesta': 'Sin sesión.'},
+            format='json',
+        )
+        self.assertEqual(respuesta.status_code, 401)
+
+    def test_pospuesta_no_aparece_en_hoy_por_defecto(self):
+        self.client.patch(
+            f'/api/subtareas/{self.gestion.id}/posponer/',
+            {'nota_pospuesta': 'Fuera de la carga.'},
+            format='json',
+        )
+        respuesta = self.client.get('/api/hoy/')
+        titulos = [
+            t['titulo']
+            for grupo in respuesta.data['grupos'].values()
+            for t in grupo
+        ]
+        self.assertNotIn('A posponer', titulos)
+        respuesta = self.client.get('/api/hoy/', {'estado': 'pospuesta'})
+        self.assertEqual(respuesta.data['total'], 1)
+        tareas = [
+            t
+            for grupo in respuesta.data['grupos'].values()
+            for t in grupo
+        ]
+        self.assertEqual(tareas[0]['nota_pospuesta'], 'Fuera de la carga.')
 
 
 class HorasPlanificadasTests(BaseAPITest):

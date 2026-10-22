@@ -146,6 +146,13 @@ class RestablecerPasswordSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------------
 
 class SubtareaSerializer(serializers.ModelSerializer):
+    # La nota de posposición es opcional y no debe crecer sin control.
+    nota_pospuesta = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500,
+    )
+
     class Meta:
         model = Subtarea
         fields = '__all__'
@@ -209,6 +216,9 @@ class SubtareaSerializer(serializers.ModelSerializer):
             })
 
         return data
+
+    def validate_nota_pospuesta(self, value):
+        return value.strip()
 
 
 class EventoSerializer(serializers.ModelSerializer):
@@ -293,6 +303,7 @@ class TareaHoySerializer(serializers.ModelSerializer):
             'hora_inicio',
             'estimacion_horas',
             'motivo_movimiento',
+            'nota_pospuesta',
             'reprogramada_en',
             'evento',
         ]
@@ -374,11 +385,36 @@ class ReprogramarTareaSerializer(serializers.Serializer):
         return value.strip()
 
 
+class PosponerTareaSerializer(serializers.Serializer):
+    plazo = serializers.DateField(
+        required=False,
+        help_text=(
+            "Nueva fecha límite opcional (YYYY-MM-DD). Si no se envía, la "
+            "gestión conserva su fecha y solo cambia de estado."
+        ),
+    )
+    hora_inicio = serializers.TimeField(
+        required=False,
+        allow_null=True,
+        help_text="Hora de comienzo opcional; con ella el servidor recalcula la hora límite.",
+    )
+    nota_pospuesta = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500,
+        help_text="Motivo opcional de la posposición.",
+    )
+
+    def validate_nota_pospuesta(self, value):
+        return value.strip()
+
+
 class ResolverConflictoSerializer(serializers.Serializer):
     estrategia = serializers.ChoiceField(
         choices=[
             ('mover_otro_dia', 'Mover a otro día'),
             ('reducir_horas', 'Reducir horas estimadas'),
+            ('posponer', 'Posponer la gestión'),
         ],
         help_text="Estrategia seleccionada para resolver el conflicto de sobrecarga.",
     )
@@ -396,6 +432,12 @@ class ResolverConflictoSerializer(serializers.Serializer):
         required=False,
         help_text="Horas estimadas reducidas si la estrategia es 'reducir_horas'.",
     )
+    nota_pospuesta = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=500,
+        help_text="Motivo opcional si la estrategia es 'posponer'.",
+    )
 
     def validate_estimacion_horas(self, value):
         if value is not None and value < Decimal('0.50'):
@@ -403,6 +445,9 @@ class ResolverConflictoSerializer(serializers.Serializer):
                 "La estimación debe ser de al menos 30 minutos."
             )
         return value
+
+    def validate_nota_pospuesta(self, value):
+        return value.strip()
 
 
 class DetalleConflictoSerializer(serializers.Serializer):

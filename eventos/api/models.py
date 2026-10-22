@@ -56,6 +56,7 @@ class Subtarea(models.Model):
         ('pendiente', 'Pendiente'),
         ('en_progreso', 'En progreso'),
         ('hecho', 'Hecho'),
+        ('pospuesta', 'Pospuesta'),
     ]
     estado = models.CharField(max_length=20, choices=OPCIONES_ESTADO, default='pendiente', verbose_name="Estado")
 
@@ -73,6 +74,13 @@ class Subtarea(models.Model):
 
     # Motivo opcional del último cambio de fecha/hora u horas de la gestión.
     motivo_movimiento = models.TextField(blank=True, default="", verbose_name="Motivo del movimiento")
+
+    # Nota opcional que explica por qué la gestión quedó pospuesta (US-09).
+    nota_pospuesta = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Motivo de la posposición",
+    )
 
     # Cuándo se reprogramó por última vez (mover o resolver conflicto); sirve
     # para destacar la gestión como «Reprogramada» en la interfaz.
