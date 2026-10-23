@@ -63,8 +63,9 @@ cd eventos
 | GET/POST | `/api/subtareas/` | Token | Lista o crea gestiones propias. |
 | GET/PUT/PATCH/DELETE | `/api/subtareas/{id}/` | Token | Detalle y edición de una gestión propia. |
 | PATCH | `/api/subtareas/{id}/reprogramar/` | Token | Reprograma una gestión evaluando sobrecarga diaria; responde 409 Conflict si supera el límite. |
-| POST | `/api/subtareas/{id}/resolver-conflicto/` | Token | Resuelve sobrecarga aplicando estrategia (`mover_otro_dia` o `reducir_horas`). |
-| GET | `/api/hoy/` | Token | Gestiones agrupadas en `vencidas`, `para_hoy` y `proximas`, ordenadas por fecha y menor esfuerzo. Filtros: `?evento=<id>` y `?estado=abiertas\|pendiente\|en_progreso\|hecho\|todas`. |
+| PATCH | `/api/subtareas/{id}/posponer/` | Token | Marca la gestión como `pospuesta` con nota opcional y fecha opcional (US-09). |
+| POST | `/api/subtareas/{id}/resolver-conflicto/` | Token | Resuelve sobrecarga aplicando estrategia (`mover_otro_dia`, `reducir_horas` o `posponer`). |
+| GET | `/api/hoy/` | Token | Gestiones agrupadas en `vencidas`, `para_hoy` y `proximas`, ordenadas por fecha y menor esfuerzo. Filtros: `?evento=<id>` y `?estado=abiertas\|pendiente\|en_progreso\|hecho\|pospuesta\|todas`. |
 | GET | `/api/health` | Pública | Salud del servicio (usada por Render). |
 | GET | `/api/docs/` | Pública | Swagger UI. |
 

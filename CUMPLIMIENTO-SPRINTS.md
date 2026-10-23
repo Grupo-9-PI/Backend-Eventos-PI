@@ -434,3 +434,44 @@ y al resolver un conflicto (ambas estrategias). Viaja en `SubtareaSerializer` y 
 | Flujo real por HTTP | Solicitar → correo en consola con enlace → restablecer → login con la nueva contraseña: OK. Token inválido y plazo tardío responden 400 con el mensaje exacto. |
 | `manage.py makemigrations --check` | Sin cambios (la recuperación no añade tablas). |
 | `manage.py spectacular --validate` | 0 errores, 0 advertencias con los dos endpoints nuevos. |
+
+---
+
+## Cierre de brechas del backlog: US-05 y US-09
+
+Esta sección complementa los sprints anteriores y deja el backend alineado con
+las historias que faltaban.
+
+### US-09 — Registrar avance con posposición
+
+- `Subtarea.OPCIONES_ESTADO` ahora incluye `pospuesta`.
+- Nuevo campo `Subtarea.nota_pospuesta` (migración
+  `0010_subtarea_nota_pospuesta_alter_subtarea_estado.py`).
+- Nuevo endpoint `PATCH /api/subtareas/{id}/posponer/`:
+  - cambia el estado a `pospuesta`;
+  - guarda `nota_pospuesta` (máximo 500 caracteres);
+  - acepta `plazo` y `hora_inicio` opcionales para mover la fecha en la misma
+    operación;
+  - no genera conflicto de sobrecarga porque una gestión pospuesta no ocupa
+    capacidad diaria.
+- `GET /api/hoy/` excluye las pospuestas del grupo por defecto (`abiertas`) y
+  las devuelve al filtrar `?estado=pospuesta` o `?estado=todas`.
+- `_cifras_dia` y `_sugerir_fechas` excluyen las pospuestas, igual que las
+  hechas.
+- El endpoint de resolución de conflictos acepta `estrategia: "posponer"` y
+  devuelve el conflicto resuelto con la nota persistida.
+
+### US-05 — Filtros de la vista Hoy
+
+- El backend ya soportaba `?evento=<id>` y `?estado=...`; se añadió
+  `pospuesta` al catálogo de estados y se documentó en Swagger.
+- Las gestiones de eventos cancelados siguen fuera de `/hoy/`.
+
+### Verificación
+
+| Comprobación | Resultado |
+| --- | --- |
+| `python manage.py test` | **99 pruebas, OK** (incluye `PospuestaTests` y los casos nuevos de `HoyTests`, `ReprogramarTests` y `ResolverConflictoTests`). |
+| `manage.py makemigrations --check` | Sin cambios pendientes. |
+| API real con SQLite temporal | 26 comprobaciones OK: filtros, posponer con y sin fecha, 409, resolución por posposición, aislamiento y borrado. |
+| `manage.py spectacular --validate` | 0 errores, 0 advertencias con el endpoint de posposición. |
