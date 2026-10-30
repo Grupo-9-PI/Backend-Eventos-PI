@@ -372,14 +372,20 @@ class HoyTests(BaseAPITest):
         respuesta = self.client.get('/api/hoy/')
         self.assertEqual(respuesta.data['total'], 5)
 
-    def test_excluye_las_pospuestas_por_defecto_y_permite_filtrarlas(self):
+    def test_incluye_las_pospuestas_por_defecto_y_permite_filtrarlas(self):
         self.crear_tarea(
             self.evento, FECHA_FIJA, estado='pospuesta',
             titulo='Pospuesta', hora='18:00',
         )
         self.autenticar(self.ana)
         respuesta = self.client.get('/api/hoy/')
-        self.assertEqual(respuesta.data['total'], 5)
+        self.assertEqual(respuesta.data['total'], 6)
+        titulos = [
+            t['titulo']
+            for grupo in respuesta.data['grupos'].values()
+            for t in grupo
+        ]
+        self.assertIn('Pospuesta', titulos)
         respuesta = self.client.get('/api/hoy/', {'estado': 'pospuesta'})
         self.assertEqual(
             [t['titulo'] for t in respuesta.data['grupos']['para_hoy']],
@@ -942,19 +948,19 @@ class PospuestaTests(BaseAPITest):
         )
         self.assertEqual(respuesta.status_code, 401)
 
-    def test_pospuesta_no_aparece_en_hoy_por_defecto(self):
+    def test_pospuesta_aparece_en_hoy_con_su_estado(self):
         self.client.patch(
             f'/api/subtareas/{self.gestion.id}/posponer/',
             {'nota_pospuesta': 'Fuera de la carga.'},
             format='json',
         )
         respuesta = self.client.get('/api/hoy/')
-        titulos = [
-            t['titulo']
+        tareas = [
+            t
             for grupo in respuesta.data['grupos'].values()
             for t in grupo
         ]
-        self.assertNotIn('A posponer', titulos)
+        self.assertTrue(any(t['titulo'] == 'A posponer' for t in tareas))
         respuesta = self.client.get('/api/hoy/', {'estado': 'pospuesta'})
         self.assertEqual(respuesta.data['total'], 1)
         tareas = [
@@ -962,6 +968,7 @@ class PospuestaTests(BaseAPITest):
             for grupo in respuesta.data['grupos'].values()
             for t in grupo
         ]
+        self.assertEqual(tareas[0]['estado'], 'pospuesta')
         self.assertEqual(tareas[0]['nota_pospuesta'], 'Fuera de la carga.')
 
 
