@@ -440,7 +440,7 @@ class HoyView(APIView):
             'comparten fecha, va primero la de menor esfuerzo estimado; ante un empate total se usa '
             'la hora límite.\n\n'
             '**Filtros:** `evento` limita a un evento propio y `estado` acepta `abiertas` (por '
-            'defecto: pendientes y en progreso), `pendiente`, `en_progreso`, `hecho`, '
+            'defecto: pendientes, en progreso y pospuestas), `pendiente`, `en_progreso`, `hecho`, '
             '`pospuesta` o `todas`.\n\n'
             '**Eventos cancelados:** sus gestiones no aparecen en esta vista, porque un evento '
             'cancelado deja de generar trabajo pendiente.'
@@ -499,8 +499,9 @@ class HoyView(APIView):
 
         estado = request.query_params.get('estado', 'abiertas')
         if estado == 'abiertas':
-            # Una gestión pospuesta tampoco forma parte de la carga abierta.
-            tareas = tareas.exclude(estado__in=['hecho', 'pospuesta'])
+            # Las pospuestas siguen visibles en Hoy con su badge; solo se
+            # excluyen las hechas y no suman en la carga diaria.
+            tareas = tareas.exclude(estado='hecho')
         elif estado == 'todas':
             pass
         elif estado in dict(Subtarea.OPCIONES_ESTADO):
